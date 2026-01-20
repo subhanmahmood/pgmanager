@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>pgmanager - PostgreSQL Database Manager</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 0;
+            border-bottom: 1px solid #333;
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            color: #00d4ff;
+            font-size: 1.8em;
+        }
+
+        .health-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #666;
+        }
+
+        .status-dot.healthy {
+            background: #00ff88;
+        }
+
+        .status-dot.unhealthy {
+            background: #ff4444;
+        }
+
+        .section {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        h2 {
+            font-size: 1.2em;
+            color: #00d4ff;
+        }
+
+        button {
+            background: #00d4ff;
+            color: #1a1a2e;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: opacity 0.2s;
+        }
+
+        button:hover {
+            opacity: 0.9;
+        }
+
+        button.danger {
+            background: #ff4444;
+            color: white;
+        }
+
+        button.secondary {
+            background: #333;
+            color: #eee;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 1px solid #333;
+        }
+
+        th {
+            color: #888;
+            font-weight: 500;
+            font-size: 0.9em;
+        }
+
+        tr:hover {
+            background: rgba(0, 212, 255, 0.1);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 24px;
+            width: 100%;
+            max-width: 500px;
+        }
+
+        .modal h3 {
+            margin-bottom: 20px;
+            color: #00d4ff;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #888;
+            font-size: 0.9em;
+        }
+
+        input, select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #333;
+            border-radius: 4px;
+            background: #1a1a2e;
+            color: #eee;
+            font-size: 1em;
+        }
+
+        input:focus, select:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            margin-top: 20px;
+        }
+
+        .connection-string {
+            background: #1a1a2e;
+            padding: 12px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.85em;
+            word-break: break-all;
+            margin-top: 10px;
+        }
+
+        .copy-btn {
+            font-size: 0.8em;
+            padding: 4px 8px;
+            margin-left: 10px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            font-weight: 500;
+        }
+
+        .badge-prod {
+            background: #ff6b6b;
+            color: white;
+        }
+
+        .badge-dev {
+            background: #4ecdc4;
+            color: #1a1a2e;
+        }
+
+        .badge-staging {
+            background: #ffd93d;
+            color: #1a1a2e;
+        }
+
+        .badge-pr {
+            background: #6c5ce7;
+            color: white;
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 12px 20px;
+            border-radius: 4px;
+            background: #00ff88;
+            color: #1a1a2e;
+            font-weight: 500;
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.3s;
+        }
+
+        .toast.error {
+            background: #ff4444;
+            color: white;
+        }
+
+        .toast.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+
+        .actions {
+            display: flex;
+            gap: 5px;
+        }
+
+        .actions button {
+            padding: 4px 8px;
+            font-size: 0.85em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>pgmanager</h1>
+            <div class="health-status">
+                <span class="status-dot" id="healthDot"></span>
+                <span id="healthText">Checking...</span>
+            </div>
+        </header>
+
+        <div class="section">
+            <div class="section-header">
+                <h2>Projects</h2>
+                <button onclick="showCreateProjectModal()">+ New Project</button>
+            </div>
+            <div id="projectsList"></div>
+        </div>
+
+        <div class="section" id="databasesSection" style="display: none;">
+            <div class="section-header">
+                <h2>Databases - <span id="currentProjectName"></span></h2>
+                <button onclick="showCreateDatabaseModal()">+ New Database</button>
+            </div>
+            <div id="databasesList"></div>
+        </div>
+    </div>
+
+    <!-- Create Project Modal -->
+    <div class="modal-overlay" id="createProjectModal">
+        <div class="modal">
+            <h3>Create Project</h3>
+            <div class="form-group">
+                <label>Project Name</label>
+                <input type="text" id="projectName" placeholder="myapp" pattern="[a-z][a-z0-9_]*">
+                <small style="color: #666; margin-top: 5px; display: block;">Lowercase letters, numbers, and underscores only</small>
+            </div>
+            <div class="modal-actions">
+                <button class="secondary" onclick="closeModal('createProjectModal')">Cancel</button>
+                <button onclick="createProject()">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Database Modal -->
+    <div class="modal-overlay" id="createDatabaseModal">
+        <div class="modal">
+            <h3>Create Database</h3>
+            <div class="form-group">
+                <label>Environment</label>
+                <select id="dbEnv" onchange="togglePRNumber()">
+                    <option value="prod">Production</option>
+                    <option value="dev">Development</option>
+                    <option value="staging">Staging</option>
+                    <option value="pr">Pull Request</option>
+                </select>
+            </div>
+            <div class="form-group" id="prNumberGroup" style="display: none;">
+                <label>PR Number</label>
+                <input type="number" id="prNumber" placeholder="123">
+            </div>
+            <div class="modal-actions">
+                <button class="secondary" onclick="closeModal('createDatabaseModal')">Cancel</button>
+                <button onclick="createDatabase()">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Database Info Modal -->
+    <div class="modal-overlay" id="databaseInfoModal">
+        <div class="modal">
+            <h3>Database Connection Info</h3>
+            <div id="databaseInfoContent"></div>
+            <div class="modal-actions">
+                <button onclick="closeModal('databaseInfoModal')">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+        const API_BASE = '/api';
+        let currentProject = null;
+        let authToken = localStorage.getItem('pgmanager_token') || '';
+
+        async function apiCall(method, path, body = null) {
+            const headers = {
+                'Content-Type': 'application/json'
+            };
+            if (authToken) {
+                headers['Authorization'] = `Bearer ${authToken}`;
+            }
+
+            const options = { method, headers };
+            if (body) {
+                options.body = JSON.stringify(body);
+            }
+
+            const response = await fetch(API_BASE + path, options);
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || 'Request failed');
+            }
+            if (response.status === 204) return null;
+            return response.json();
+        }
+
+        function showToast(message, isError = false) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = 'toast' + (isError ? ' error' : '');
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+
+        function showModal(id) {
+            document.getElementById(id).classList.add('active');
+        }
+
+        function closeModal(id) {
+            document.getElementById(id).classList.remove('active');
+        }
+
+        async function checkHealth() {
+            try {
+                const data = await apiCall('GET', '/health');
+                document.getElementById('healthDot').classList.add('healthy');
+                document.getElementById('healthText').textContent = 'Connected';
+            } catch (e) {
+                document.getElementById('healthDot').classList.add('unhealthy');
+                document.getElementById('healthText').textContent = 'Disconnected';
+            }
+        }
+
+        async function loadProjects() {
+            try {
+                const projects = await apiCall('GET', '/projects');
+                const container = document.getElementById('projectsList');
+
+                if (!projects || projects.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No projects yet. Create one to get started.</div>';
+                    return;
+                }
+
+                container.innerHTML = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Created</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${projects.map(p => `
+                                <tr>
+                                    <td><a href="#" onclick="selectProject('${p.name}')" style="color: #00d4ff; text-decoration: none;">${p.name}</a></td>
+                                    <td>${new Date(p.created_at).toLocaleDateString()}</td>
+                                    <td class="actions">
+                                        <button onclick="selectProject('${p.name}')">View DBs</button>
+                                        <button class="danger" onclick="deleteProject('${p.name}')">Delete</button>
+                                    </td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                `;
+            } catch (e) {
+                showToast(e.message, true);
+            }
+        }
+
+        async function selectProject(name) {
+            currentProject = name;
+            document.getElementById('currentProjectName').textContent = name;
+            document.getElementById('databasesSection').style.display = 'block';
+            await loadDatabases();
+        }
+
+        async function loadDatabases() {
+            if (!currentProject) return;
+
+            try {
+                const databases = await apiCall('GET', `/projects/${currentProject}/databases`);
+                const container = document.getElementById('databasesList');
+
+                if (!databases || databases.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No databases yet. Create one to get started.</div>';
+                    return;
+                }
+
+                container.innerHTML = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Database</th>
+                                <th>Environment</th>
+                                <th>Created</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${databases.map(db => {
+                                const env = db.pr_number ? `pr_${db.pr_number}` : db.env;
+                                const badgeClass = db.env === 'pr' ? 'badge-pr' : `badge-${db.env}`;
+                                return `
+                                    <tr>
+                                        <td>${db.database_name}</td>
+                                        <td><span class="badge ${badgeClass}">${env}</span></td>
+                                        <td>${new Date(db.created_at).toLocaleDateString()}</td>
+                                        <td class="actions">
+                                            <button onclick='showDatabaseInfo(${JSON.stringify(db)})'>Info</button>
+                                            <button class="danger" onclick="deleteDatabase('${env}')">Delete</button>
+                                        </td>
+                                    </tr>
+                                `;
+                            }).join('')}
+                        </tbody>
+                    </table>
+                `;
+            } catch (e) {
+                showToast(e.message, true);
+            }
+        }
+
+        function showDatabaseInfo(db) {
+            const content = `
+                <div class="form-group">
+                    <label>Database</label>
+                    <input type="text" value="${db.database_name}" readonly>
+                </div>
+                <div class="form-group">
+                    <label>User</label>
+                    <input type="text" value="${db.user_name}" readonly>
+                </div>
+                <div class="form-group">
+                    <label>Password</label>
+                    <input type="text" value="${db.password}" readonly>
+                </div>
+                <div class="form-group">
+                    <label>Host</label>
+                    <input type="text" value="${db.host}" readonly>
+                </div>
+                <div class="form-group">
+                    <label>Port</label>
+                    <input type="text" value="${db.port}" readonly>
+                </div>
+                <div class="form-group">
+                    <label>Connection String <button class="copy-btn" onclick="copyToClipboard('${db.connection_string}')">Copy</button></label>
+                    <div class="connection-string">${db.connection_string}</div>
+                </div>
+            `;
+            document.getElementById('databaseInfoContent').innerHTML = content;
+            showModal('databaseInfoModal');
+        }
+
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                showToast('Copied to clipboard');
+            });
+        }
+
+        function showCreateProjectModal() {
+            document.getElementById('projectName').value = '';
+            showModal('createProjectModal');
+        }
+
+        async function createProject() {
+            const name = document.getElementById('projectName').value.trim();
+            if (!name) {
+                showToast('Project name is required', true);
+                return;
+            }
+
+            try {
+                await apiCall('POST', '/projects', { name });
+                closeModal('createProjectModal');
+                showToast('Project created successfully');
+                await loadProjects();
+            } catch (e) {
+                showToast(e.message, true);
+            }
+        }
+
+        async function deleteProject(name) {
+            if (!confirm(`Delete project "${name}" and all its databases?`)) return;
+
+            try {
+                await apiCall('DELETE', `/projects/${name}`);
+                showToast('Project deleted');
+                if (currentProject === name) {
+                    currentProject = null;
+                    document.getElementById('databasesSection').style.display = 'none';
+                }
+                await loadProjects();
+            } catch (e) {
+                showToast(e.message, true);
+            }
+        }
+
+        function showCreateDatabaseModal() {
+            document.getElementById('dbEnv').value = 'prod';
+            document.getElementById('prNumber').value = '';
+            document.getElementById('prNumberGroup').style.display = 'none';
+            showModal('createDatabaseModal');
+        }
+
+        function togglePRNumber() {
+            const env = document.getElementById('dbEnv').value;
+            document.getElementById('prNumberGroup').style.display = env === 'pr' ? 'block' : 'none';
+        }
+
+        async function createDatabase() {
+            const env = document.getElementById('dbEnv').value;
+            const body = { env };
+
+            if (env === 'pr') {
+                const prNumber = parseInt(document.getElementById('prNumber').value);
+                if (!prNumber) {
+                    showToast('PR number is required', true);
+                    return;
+                }
+                body.number = prNumber;
+            }
+
+            try {
+                await apiCall('POST', `/projects/${currentProject}/databases`, body);
+                closeModal('createDatabaseModal');
+                showToast('Database created successfully');
+                await loadDatabases();
+            } catch (e) {
+                showToast(e.message, true);
+            }
+        }
+
+        async function deleteDatabase(env) {
+            if (!confirm(`Delete database "${currentProject}_${env}"?`)) return;
+
+            try {
+                await apiCall('DELETE', `/projects/${currentProject}/databases/${env}`);
+                showToast('Database deleted');
+                await loadDatabases();
+            } catch (e) {
+                showToast(e.message, true);
+            }
+        }
+
+        // Initialize
+        checkHealth();
+        loadProjects();
+        setInterval(checkHealth, 30000);
+    </script>
+</body>
+</html>

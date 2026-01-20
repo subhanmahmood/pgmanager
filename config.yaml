@@ -1,0 +1,16 @@
+postgres:
+  host: postgres
+  port: 5432
+  user: postgres
+  password: YMa1MitayCu1X9wuDG69eI3J18Rm0d
+  database: postgres
+
+sqlite:
+  path: /data/pgmanager.db
+
+api:
+  port: 8080
+  token: ""  # Set via PGMANAGER_API_TOKEN env var
+
+cleanup:
+  default_ttl: 168h  # 7 days for PR databases
