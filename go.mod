@@ -9,6 +9,7 @@ require (
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/mattn/go-sqlite3 v1.14.24
 	github.com/spf13/cobra v1.8.1
+	golang.org/x/time v0.5.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

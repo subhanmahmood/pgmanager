@@ -37,9 +37,9 @@ type Database struct {
 
 // NewStore creates a new SQLite metadata store
 func NewStore(dbPath string) (*Store, error) {
-	// Create directory if it doesn't exist
+	// Create directory if it doesn't exist with restricted permissions
 	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 

@@ -3,12 +3,16 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 )
+
+// MaxPRNumber is the maximum allowed PR number
+const MaxPRNumber = 1000000
 
 // Response types
 type ErrorResponse struct {
@@ -25,6 +29,7 @@ type ProjectResponse struct {
 	CreatedAt string `json:"created_at"`
 }
 
+// DatabaseResponse is returned when creating a database (includes sensitive info)
 type DatabaseResponse struct {
 	Project      string  `json:"project"`
 	Env          string  `json:"env"`
@@ -35,6 +40,19 @@ type DatabaseResponse struct {
 	Host         string  `json:"host"`
 	Port         int     `json:"port"`
 	ConnString   string  `json:"connection_string"`
+	CreatedAt    string  `json:"created_at"`
+	ExpiresAt    *string `json:"expires_at,omitempty"`
+}
+
+// DatabaseInfoResponse is returned when listing/getting databases (no sensitive info)
+type DatabaseInfoResponse struct {
+	Project      string  `json:"project"`
+	Env          string  `json:"env"`
+	PRNumber     *int    `json:"pr_number,omitempty"`
+	DatabaseName string  `json:"database_name"`
+	UserName     string  `json:"user_name"`
+	Host         string  `json:"host"`
+	Port         int     `json:"port"`
 	CreatedAt    string  `json:"created_at"`
 	ExpiresAt    *string `json:"expires_at,omitempty"`
 }
@@ -68,6 +86,12 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, ErrorResponse{Error: message})
 }
 
+// writeInternalError logs the full error and returns a generic message to the client
+func writeInternalError(w http.ResponseWriter, context string, err error) {
+	log.Printf("ERROR [%s]: %v", context, err)
+	writeError(w, http.StatusInternalServerError, "internal server error")
+}
+
 // Handlers
 func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, HealthResponse{
@@ -79,7 +103,7 @@ func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	projects, err := s.mgr.ListProjects(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, "listProjects", err)
 		return
 	}
 
@@ -121,7 +145,12 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 
 	if err := s.mgr.DeleteProject(r.Context(), name); err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		// Check if it's a not found error
+		if err.Error() == fmt.Sprintf("project not found: %s", name) {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		writeInternalError(w, "deleteProject", err)
 		return
 	}
 
@@ -133,11 +162,17 @@ func (s *Server) listDatabases(w http.ResponseWriter, r *http.Request) {
 
 	databases, err := s.mgr.ListDatabases(r.Context(), projectName)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		// Check if it's a project not found error
+		if err.Error() == fmt.Sprintf("project '%s' not found", projectName) {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		writeInternalError(w, "listDatabases", err)
 		return
 	}
 
-	response := make([]DatabaseResponse, len(databases))
+	// Return DatabaseInfoResponse without password/connection string
+	response := make([]DatabaseInfoResponse, len(databases))
 	for i, db := range databases {
 		var expiresAt *string
 		if db.ExpiresAt != nil {
@@ -145,16 +180,14 @@ func (s *Server) listDatabases(w http.ResponseWriter, r *http.Request) {
 			expiresAt = &t
 		}
 
-		response[i] = DatabaseResponse{
+		response[i] = DatabaseInfoResponse{
 			Project:      db.Project,
 			Env:          db.Env,
 			PRNumber:     db.PRNumber,
 			DatabaseName: db.DatabaseName,
 			UserName:     db.UserName,
-			Password:     db.Password,
 			Host:         db.Host,
 			Port:         db.Port,
-			ConnString:   db.ConnString,
 			CreatedAt:    db.CreatedAt.Format(time.RFC3339),
 			ExpiresAt:    expiresAt,
 		}
@@ -175,6 +208,18 @@ func (s *Server) createDatabase(w http.ResponseWriter, r *http.Request) {
 	if req.Env == "" {
 		writeError(w, http.StatusBadRequest, "env is required")
 		return
+	}
+
+	// Validate PR number bounds
+	if req.PRNumber != nil {
+		if *req.PRNumber <= 0 {
+			writeError(w, http.StatusBadRequest, "PR number must be positive")
+			return
+		}
+		if *req.PRNumber > MaxPRNumber {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("PR number must be less than %d", MaxPRNumber))
+			return
+		}
 	}
 
 	info, err := s.mgr.CreateDatabase(r.Context(), projectName, req.Env, req.PRNumber)
@@ -213,6 +258,11 @@ func (s *Server) getDatabase(w http.ResponseWriter, r *http.Request) {
 	if len(env) > 3 && env[:3] == "pr_" {
 		num, err := strconv.Atoi(env[3:])
 		if err == nil {
+			// Validate PR number bounds
+			if num <= 0 || num > MaxPRNumber {
+				writeError(w, http.StatusBadRequest, "invalid PR number")
+				return
+			}
 			prNumber = &num
 			env = "pr"
 		}
@@ -220,7 +270,7 @@ func (s *Server) getDatabase(w http.ResponseWriter, r *http.Request) {
 
 	info, err := s.mgr.GetDatabase(r.Context(), projectName, env, prNumber)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, "database not found")
 		return
 	}
 
@@ -230,16 +280,15 @@ func (s *Server) getDatabase(w http.ResponseWriter, r *http.Request) {
 		expiresAt = &t
 	}
 
-	writeJSON(w, http.StatusOK, DatabaseResponse{
+	// Return DatabaseInfoResponse without password/connection string
+	writeJSON(w, http.StatusOK, DatabaseInfoResponse{
 		Project:      info.Project,
 		Env:          info.Env,
 		PRNumber:     info.PRNumber,
 		DatabaseName: info.DatabaseName,
 		UserName:     info.UserName,
-		Password:     info.Password,
 		Host:         info.Host,
 		Port:         info.Port,
-		ConnString:   info.ConnString,
 		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
 		ExpiresAt:    expiresAt,
 	})
@@ -254,13 +303,18 @@ func (s *Server) deleteDatabase(w http.ResponseWriter, r *http.Request) {
 	if len(env) > 3 && env[:3] == "pr_" {
 		num, err := strconv.Atoi(env[3:])
 		if err == nil {
+			// Validate PR number bounds
+			if num <= 0 || num > MaxPRNumber {
+				writeError(w, http.StatusBadRequest, "invalid PR number")
+				return
+			}
 			prNumber = &num
 			env = "pr"
 		}
 	}
 
 	if err := s.mgr.DeleteDatabase(r.Context(), projectName, env, prNumber); err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, "database not found")
 		return
 	}
 
@@ -286,7 +340,7 @@ func (s *Server) cleanup(w http.ResponseWriter, r *http.Request) {
 
 	deleted, err := s.mgr.Cleanup(r.Context(), duration)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, "cleanup", err)
 		return
 	}
 

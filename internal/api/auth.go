@@ -30,7 +30,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		// Extract and validate token
 		token := strings.TrimPrefix(authHeader, "Bearer ")
-		if !validateToken(token, s.cfg.API.Token) {
+		valid, tokenNotConfigured := validateToken(token, s.cfg.API.Token, s.cfg.API.RequireToken)
+		if tokenNotConfigured {
+			writeError(w, http.StatusServiceUnavailable, "API token not configured")
+			return
+		}
+		if !valid {
 			writeError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
@@ -40,9 +45,15 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 }
 
 // validateToken performs constant-time comparison of tokens to prevent timing attacks
-func validateToken(provided, expected string) bool {
+// Returns: (valid bool, tokenRequired bool)
+func validateToken(provided, expected string, requireToken bool) (bool, bool) {
 	if expected == "" {
-		return true // No token configured, allow all requests
+		if requireToken {
+			// Token is required but not configured - reject all requests
+			return false, true
+		}
+		// No token configured and not required - allow all requests
+		return true, false
 	}
-	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1, false
 }

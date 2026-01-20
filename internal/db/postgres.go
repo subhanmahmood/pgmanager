@@ -23,8 +23,12 @@ func NewPostgresClient(cfg *config.PostgresConfig) *PostgresClient {
 
 // connect establishes a connection to the PostgreSQL server
 func (c *PostgresClient) connect(ctx context.Context) (*pgx.Conn, error) {
-	connStr := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-		c.cfg.Host, c.cfg.Port, c.cfg.User, c.cfg.Password, c.cfg.Database)
+	sslMode := c.cfg.SSLMode
+	if sslMode == "" {
+		sslMode = "require"
+	}
+	connStr := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		c.cfg.Host, c.cfg.Port, c.cfg.User, c.cfg.Password, c.cfg.Database, sslMode)
 	return pgx.Connect(ctx, connStr)
 }
 
@@ -149,8 +153,12 @@ func (c *PostgresClient) ListDatabases(ctx context.Context) ([]string, error) {
 
 // TestConnection tests the connection to the database
 func (c *PostgresClient) TestConnection(ctx context.Context, dbName, userName, password string) error {
-	connStr := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-		c.cfg.Host, c.cfg.Port, userName, password, dbName)
+	sslMode := c.cfg.SSLMode
+	if sslMode == "" {
+		sslMode = "require"
+	}
+	connStr := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		c.cfg.Host, c.cfg.Port, userName, password, dbName, sslMode)
 	conn, err := pgx.Connect(ctx, connStr)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
@@ -171,9 +179,12 @@ func GeneratePassword() string {
 }
 
 // ConnectionString returns a PostgreSQL connection string
-func ConnectionString(host string, port int, dbName, userName, password string) string {
-	return fmt.Sprintf("postgresql://%s:%s@%s:%d/%s?sslmode=disable",
-		userName, password, host, port, dbName)
+func ConnectionString(host string, port int, dbName, userName, password, sslMode string) string {
+	if sslMode == "" {
+		sslMode = "require"
+	}
+	return fmt.Sprintf("postgresql://%s:%s@%s:%d/%s?sslmode=%s",
+		userName, password, host, port, dbName, sslMode)
 }
 
 // quoteLiteral properly quotes a string literal for SQL

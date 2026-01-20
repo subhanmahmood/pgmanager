@@ -38,20 +38,32 @@ func NewServer(cfg *config.Config, mgr *project.Manager, port int) *Server {
 func (s *Server) setupRoutes() {
 	r := chi.NewRouter()
 
-	// Middleware
+	// Core middleware
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Timeout(60 * time.Second))
 
+	// Security middleware
+	r.Use(securityHeadersMiddleware)
+
+	// CORS middleware (if origins configured)
+	if len(s.cfg.API.AllowedOrigins) > 0 {
+		r.Use(corsMiddleware(s.cfg.API.AllowedOrigins))
+	}
+
+	// Rate limiting: 100 requests per second with burst of 200
+	rateLimiter := NewRateLimiter(100, 200)
+	r.Use(rateLimiter.Middleware)
+
 	// Health check (no auth required)
 	r.Get("/api/health", s.healthHandler)
 
-	// API routes with optional auth
+	// API routes with auth
 	r.Route("/api", func(r chi.Router) {
-		// Apply auth middleware if token is configured
-		if s.cfg.API.Token != "" {
+		// Apply auth middleware if token is configured or required
+		if s.cfg.API.Token != "" || s.cfg.API.RequireToken {
 			r.Use(s.authMiddleware)
 		}
 

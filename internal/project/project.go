@@ -213,7 +213,7 @@ func (m *Manager) CreateDatabase(ctx context.Context, projectName, env string, p
 		Password:     password,
 		Host:         m.cfg.Postgres.Host,
 		Port:         m.cfg.Postgres.Port,
-		ConnString:   db.ConnectionString(m.cfg.Postgres.Host, m.cfg.Postgres.Port, dbName, userName, password),
+		ConnString:   db.ConnectionString(m.cfg.Postgres.Host, m.cfg.Postgres.Port, dbName, userName, password, m.cfg.Postgres.SSLMode),
 		CreatedAt:    dbRecord.CreatedAt,
 		ExpiresAt:    expiresAt,
 	}, nil
@@ -256,7 +256,7 @@ func (m *Manager) GetDatabase(ctx context.Context, projectName, env string, prNu
 		Password:     dbRecord.Password,
 		Host:         m.cfg.Postgres.Host,
 		Port:         m.cfg.Postgres.Port,
-		ConnString:   db.ConnectionString(m.cfg.Postgres.Host, m.cfg.Postgres.Port, dbRecord.Name, dbRecord.UserName, dbRecord.Password),
+		ConnString:   db.ConnectionString(m.cfg.Postgres.Host, m.cfg.Postgres.Port, dbRecord.Name, dbRecord.UserName, dbRecord.Password, m.cfg.Postgres.SSLMode),
 		CreatedAt:    dbRecord.CreatedAt,
 		ExpiresAt:    dbRecord.ExpiresAt,
 	}, nil
@@ -308,7 +308,7 @@ func (m *Manager) ListDatabases(ctx context.Context, projectName string) ([]Data
 			Password:     dbItem.Password,
 			Host:         m.cfg.Postgres.Host,
 			Port:         m.cfg.Postgres.Port,
-			ConnString:   db.ConnectionString(m.cfg.Postgres.Host, m.cfg.Postgres.Port, dbItem.Name, dbItem.UserName, dbItem.Password),
+			ConnString:   db.ConnectionString(m.cfg.Postgres.Host, m.cfg.Postgres.Port, dbItem.Name, dbItem.UserName, dbItem.Password, m.cfg.Postgres.SSLMode),
 			CreatedAt:    dbItem.CreatedAt,
 			ExpiresAt:    dbItem.ExpiresAt,
 		})

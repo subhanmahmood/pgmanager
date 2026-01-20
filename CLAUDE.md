@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build & Test Commands
 
+### With Go installed locally
+
 ```bash
 # Run all tests
 go test ./...
@@ -14,10 +16,22 @@ go test -v ./internal/...
 # Run a specific test
 go test -run TestValidateName ./internal/project
 
-# Build binary (requires Go installed)
+# Build binary
 go build -o pgmanager ./cmd/pgmanager
+```
 
-# Build with Docker (preferred if Go not installed)
+### With Docker (preferred if Go not installed)
+
+```bash
+# Run all tests via Docker
+docker run --rm -v "$(pwd):/app" -w /app golang:1.23-alpine \
+  sh -c "apk add --no-cache gcc musl-dev && go test ./..."
+
+# Run tests with verbose output via Docker
+docker run --rm -v "$(pwd):/app" -w /app golang:1.23-alpine \
+  sh -c "apk add --no-cache gcc musl-dev && go test -v ./internal/..."
+
+# Build Docker image
 docker build -t pgmanager:latest .
 ```
 
@@ -74,7 +88,10 @@ pgmanager is a PostgreSQL database management tool with project-based organizati
 
 Config loaded from YAML with environment variable overrides:
 - `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DATABASE` - PostgreSQL connection
+- `POSTGRES_SSLMODE` - SSL mode for PostgreSQL (disable, require, verify-ca, verify-full). Defaults to `require`
 - `PGMANAGER_API_PORT`, `PGMANAGER_API_TOKEN` - API server settings
+- `PGMANAGER_REQUIRE_TOKEN` - Set to `true` to require API authentication (default: true)
+- `PGMANAGER_ALLOWED_ORIGINS` - Comma-separated list of allowed CORS origins
 - `PGMANAGER_SQLITE_PATH` - SQLite database location
 
 ## Testing Patterns

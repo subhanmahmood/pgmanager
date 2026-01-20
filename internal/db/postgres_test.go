@@ -35,31 +35,44 @@ func TestConnectionString(t *testing.T) {
 		dbName   string
 		userName string
 		password string
+		sslMode  string
 		want     string
 	}{
 		{
-			name:     "basic connection string",
+			name:     "basic connection string with require ssl",
 			host:     "localhost",
 			port:     5432,
 			dbName:   "myapp_prod",
 			userName: "myapp_prod_user",
 			password: "secret123",
-			want:     "postgresql://myapp_prod_user:secret123@localhost:5432/myapp_prod?sslmode=disable",
+			sslMode:  "require",
+			want:     "postgresql://myapp_prod_user:secret123@localhost:5432/myapp_prod?sslmode=require",
 		},
 		{
-			name:     "different port",
+			name:     "different port with disable ssl",
 			host:     "db.example.com",
 			port:     5433,
 			dbName:   "testdb",
 			userName: "testuser",
 			password: "pass",
+			sslMode:  "disable",
 			want:     "postgresql://testuser:pass@db.example.com:5433/testdb?sslmode=disable",
+		},
+		{
+			name:     "empty sslmode defaults to require",
+			host:     "localhost",
+			port:     5432,
+			dbName:   "testdb",
+			userName: "testuser",
+			password: "pass",
+			sslMode:  "",
+			want:     "postgresql://testuser:pass@localhost:5432/testdb?sslmode=require",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ConnectionString(tt.host, tt.port, tt.dbName, tt.userName, tt.password)
+			got := ConnectionString(tt.host, tt.port, tt.dbName, tt.userName, tt.password, tt.sslMode)
 			if got != tt.want {
 				t.Errorf("ConnectionString() = %q, want %q", got, tt.want)
 			}
@@ -92,7 +105,7 @@ func TestQuoteLiteral(t *testing.T) {
 
 func TestConnectionStringSpecialChars(t *testing.T) {
 	// Test that special characters in password don't break the URL
-	connStr := ConnectionString("localhost", 5432, "testdb", "user", "pass@word#123")
+	connStr := ConnectionString("localhost", 5432, "testdb", "user", "pass@word#123", "require")
 
 	if !strings.Contains(connStr, "pass@word#123") {
 		t.Error("connection string should contain the password with special characters")

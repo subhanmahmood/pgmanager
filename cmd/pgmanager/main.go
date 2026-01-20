@@ -372,14 +372,13 @@ func dbInfo(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Database: %s\n", info.DatabaseName)
 	fmt.Printf("User:     %s\n", info.UserName)
-	fmt.Printf("Password: %s\n", info.Password)
 	fmt.Printf("Host:     %s\n", info.Host)
 	fmt.Printf("Port:     %d\n", info.Port)
 	fmt.Printf("Created:  %s\n", info.CreatedAt.Format("2006-01-02 15:04:05"))
 	if info.ExpiresAt != nil {
 		fmt.Printf("Expires:  %s\n", info.ExpiresAt.Format("2006-01-02 15:04:05"))
 	}
-	fmt.Printf("\nConnection string:\n%s\n", info.ConnString)
+	fmt.Println("\nNote: Password and connection string are only shown when the database is created.")
 
 	return nil
 }
