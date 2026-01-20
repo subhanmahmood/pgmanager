@@ -123,12 +123,18 @@ curl http://localhost:8080/api/projects/myapp/databases/dev
 
 ### Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `POSTGRES_HOST` | PostgreSQL host |
-| `POSTGRES_PASSWORD` | PostgreSQL password |
-| `PGMANAGER_API_TOKEN` | Bearer token for API auth |
-| `PGMANAGER_SQLITE_PATH` | SQLite database location |
+All config values can be overridden with environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `POSTGRES_HOST` | PostgreSQL host | `localhost` |
+| `POSTGRES_PORT` | PostgreSQL port | `5432` |
+| `POSTGRES_USER` | PostgreSQL user | `postgres` |
+| `POSTGRES_PASSWORD` | PostgreSQL password | |
+| `POSTGRES_DATABASE` | PostgreSQL database | `postgres` |
+| `PGMANAGER_SQLITE_PATH` | SQLite database location | `./data/pgmanager.db` |
+| `PGMANAGER_API_PORT` | API server port | `8080` |
+| `PGMANAGER_API_TOKEN` | Bearer token for API auth | |
 
 ## Docker Usage
 

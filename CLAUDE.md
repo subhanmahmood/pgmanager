@@ -73,8 +73,8 @@ pgmanager is a PostgreSQL database management tool with project-based organizati
 ### Configuration
 
 Config loaded from YAML with environment variable overrides:
-- `POSTGRES_HOST`, `POSTGRES_PASSWORD` - PostgreSQL connection
-- `PGMANAGER_API_TOKEN` - Bearer token for API auth
+- `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DATABASE` - PostgreSQL connection
+- `PGMANAGER_API_PORT`, `PGMANAGER_API_TOKEN` - API server settings
 - `PGMANAGER_SQLITE_PATH` - SQLite database location
 
 ## Testing Patterns

@@ -1,16 +1,23 @@
+# PostgreSQL connection
+# Override with: POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DATABASE
 postgres:
-  host: postgres
+  host: localhost
   port: 5432
   user: postgres
-  password: YMa1MitayCu1X9wuDG69eI3J18Rm0d
+  password: ""
   database: postgres
 
+# SQLite metadata storage
+# Override with: PGMANAGER_SQLITE_PATH
 sqlite:
-  path: /data/pgmanager.db
+  path: ./data/pgmanager.db
 
+# API server config
+# Override with: PGMANAGER_API_PORT, PGMANAGER_API_TOKEN
 api:
   port: 8080
-  token: ""  # Set via PGMANAGER_API_TOKEN env var
+  token: ""
 
+# Cleanup settings
 cleanup:
   default_ttl: 168h  # 7 days for PR databases

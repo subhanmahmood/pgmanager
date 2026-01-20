@@ -1,0 +1,15 @@
+# Binaries
+pgmanager
+*.exe
+
+# Environment files
+.env
+
+# Data
+data/
+*.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
