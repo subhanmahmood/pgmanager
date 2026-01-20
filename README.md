@@ -130,14 +130,54 @@ curl http://localhost:8080/api/projects/myapp/databases/dev
 | `PGMANAGER_API_TOKEN` | Bearer token for API auth |
 | `PGMANAGER_SQLITE_PATH` | SQLite database location |
 
-## Docker Deployment
+## Docker Usage
+
+### Build
+
+```bash
+docker build -t pgmanager:latest .
+```
+
+### Run Commands via Docker
+
+```bash
+# List projects
+docker run --rm -v "$(pwd)/config.yaml:/etc/pgmanager/config.yaml" \
+  pgmanager:latest pgmanager --config /etc/pgmanager/config.yaml project list
+
+# Create a database
+docker run --rm -v "$(pwd)/config.yaml:/etc/pgmanager/config.yaml" \
+  pgmanager:latest pgmanager --config /etc/pgmanager/config.yaml db create myproject dev
+
+# Start API server
+docker run --rm -p 8080:8080 -v "$(pwd)/config.yaml:/etc/pgmanager/config.yaml" \
+  pgmanager:latest pgmanager --config /etc/pgmanager/config.yaml serve -p 8080
+```
+
+### Shell Alias
+
+Add to `~/.zshrc` or `~/.bashrc` for convenience:
+
+```bash
+alias pgmanager='docker run --rm -it -p 8080:8080 -v "/path/to/config.yaml:/etc/pgmanager/config.yaml" -v "/path/to/data:/data" pgmanager:latest pgmanager --config /etc/pgmanager/config.yaml'
+```
+
+Then use from anywhere:
+
+```bash
+pgmanager project list
+pgmanager db create myapp dev
+pgmanager serve -p 8080
+```
+
+### Docker Deployment (daemon)
 
 ```bash
 docker run -d \
   -p 8080:8080 \
   -v ./config.yaml:/etc/pgmanager/config.yaml \
   -v pgmanager-data:/data \
-  pgmanager:latest
+  pgmanager:latest pgmanager --config /etc/pgmanager/config.yaml serve
 ```
 
 ## Naming Conventions

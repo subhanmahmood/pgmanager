@@ -14,10 +14,10 @@ go test -v ./internal/...
 # Run a specific test
 go test -run TestValidateName ./internal/project
 
-# Build binary
+# Build binary (requires Go installed)
 go build -o pgmanager ./cmd/pgmanager
 
-# Build with Docker
+# Build with Docker (preferred if Go not installed)
 docker build -t pgmanager:latest .
 ```
 
@@ -33,6 +33,18 @@ docker build -t pgmanager:latest .
 
 # Start terminal UI
 ./pgmanager --config config.yaml tui
+```
+
+### Running via Docker
+
+```bash
+# Run any command via Docker
+docker run --rm -v "$(pwd)/config.yaml:/etc/pgmanager/config.yaml" \
+  pgmanager:latest pgmanager --config /etc/pgmanager/config.yaml project list
+
+# Start API server with port mapping
+docker run --rm -p 8080:8080 -v "$(pwd)/config.yaml:/etc/pgmanager/config.yaml" \
+  pgmanager:latest pgmanager --config /etc/pgmanager/config.yaml serve -p 8080
 ```
 
 ## Architecture
