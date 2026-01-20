@@ -2,6 +2,41 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Installation
+
+### Quick install (Linux/macOS)
+
+```bash
+curl -sSL https://raw.githubusercontent.com/subhanmahmood/pgmanager/master/install.sh | bash
+```
+
+### Manual install
+
+Download the binary for your platform from [GitHub Releases](https://github.com/subhanmahmood/pgmanager/releases):
+
+- `pgmanager-linux-amd64` - Linux x86_64
+- `pgmanager-linux-arm64` - Linux ARM64
+- `pgmanager-darwin-amd64` - macOS Intel
+- `pgmanager-darwin-arm64` - macOS Apple Silicon
+
+```bash
+# Example for Linux amd64
+curl -sSL https://github.com/subhanmahmood/pgmanager/releases/latest/download/pgmanager-linux-amd64 -o pgmanager
+chmod +x pgmanager
+sudo mv pgmanager /usr/local/bin/
+```
+
+### CI Usage
+
+```yaml
+# GitHub Actions example
+- name: Install pgmanager
+  run: curl -sSL https://raw.githubusercontent.com/subhanmahmood/pgmanager/master/install.sh | bash
+
+- name: Create PR database
+  run: pgmanager --config config.yaml db create myproject pr ${{ github.event.pull_request.number }}
+```
+
 ## Build & Test Commands
 
 ### With Go installed locally
