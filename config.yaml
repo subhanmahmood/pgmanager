@@ -1,3 +1,6 @@
+# pgmanager configuration
+# Metadata is stored in the PostgreSQL server itself (in the pgmanager schema)
+
 # PostgreSQL connection
 # Override with: POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DATABASE
 postgres:
@@ -6,17 +9,14 @@ postgres:
   user: postgres
   password: ""
   database: postgres
-
-# SQLite metadata storage
-# Override with: PGMANAGER_SQLITE_PATH
-sqlite:
-  path: ./data/pgmanager.db
+  ssl_mode: disable  # disable, require, verify-ca, verify-full
 
 # API server config
 # Override with: PGMANAGER_API_PORT, PGMANAGER_API_TOKEN
 api:
   port: 8080
   token: ""
+  require_token: true
 
 # Cleanup settings
 cleanup:

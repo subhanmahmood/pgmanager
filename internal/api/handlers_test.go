@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"pgmanager/internal/config"
@@ -17,11 +15,6 @@ import (
 func setupTestServer(t *testing.T) (*Server, func()) {
 	t.Helper()
 
-	tmpDir, err := os.MkdirTemp("", "pgmanager-api-test-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-
 	cfg := &config.Config{
 		Postgres: config.PostgresConfig{
 			Host:     "localhost",
@@ -30,27 +23,18 @@ func setupTestServer(t *testing.T) (*Server, func()) {
 			Password: "test",
 			Database: "postgres",
 		},
-		SQLite: config.SQLiteConfig{
-			Path: filepath.Join(tmpDir, "test.db"),
-		},
 		API: config.APIConfig{
 			Port:  8080,
 			Token: "",
 		},
 	}
 
-	store, err := meta.NewStore(cfg.SQLite.Path)
-	if err != nil {
-		os.RemoveAll(tmpDir)
-		t.Fatalf("failed to create store: %v", err)
-	}
-
+	store := meta.NewMockStore()
 	mgr := project.NewManager(cfg, store)
 	server := NewServer(cfg, mgr, cfg.API.Port)
 
 	cleanup := func() {
 		store.Close()
-		os.RemoveAll(tmpDir)
 	}
 
 	return server, cleanup
@@ -195,12 +179,6 @@ func TestInvalidProjectName(t *testing.T) {
 }
 
 func TestAuthMiddleware(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "pgmanager-auth-test-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
 	cfg := &config.Config{
 		Postgres: config.PostgresConfig{
 			Host:     "localhost",
@@ -209,19 +187,13 @@ func TestAuthMiddleware(t *testing.T) {
 			Password: "test",
 			Database: "postgres",
 		},
-		SQLite: config.SQLiteConfig{
-			Path: filepath.Join(tmpDir, "test.db"),
-		},
 		API: config.APIConfig{
 			Port:  8080,
 			Token: "secret-token",
 		},
 	}
 
-	store, err := meta.NewStore(cfg.SQLite.Path)
-	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
-	}
+	store := meta.NewMockStore()
 	defer store.Close()
 
 	mgr := project.NewManager(cfg, store)

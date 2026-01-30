@@ -18,10 +18,10 @@ import (
 
 // Server represents the HTTP API server
 type Server struct {
-	cfg     *config.Config
-	mgr     *project.Manager
-	port    int
-	router  *chi.Mux
+	cfg    *config.Config
+	mgr    *project.Manager
+	port   int
+	router *chi.Mux
 }
 
 // NewServer creates a new API server

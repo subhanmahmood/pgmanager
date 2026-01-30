@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -9,9 +11,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// ConfigFileNames are the names to search for when auto-discovering config
+var ConfigFileNames = []string{
+	"pgmanager.yaml",
+	"pgmanager.yml",
+	".pgmanager.yaml",
+	".pgmanager.yml",
+}
+
 type Config struct {
 	Postgres PostgresConfig `yaml:"postgres"`
-	SQLite   SQLiteConfig   `yaml:"sqlite"`
 	API      APIConfig      `yaml:"api"`
 	Cleanup  CleanupConfig  `yaml:"cleanup"`
 }
@@ -25,10 +34,6 @@ type PostgresConfig struct {
 	SSLMode  string `yaml:"ssl_mode"` // disable, require, verify-ca, verify-full
 }
 
-type SQLiteConfig struct {
-	Path string `yaml:"path"`
-}
-
 type APIConfig struct {
 	Port           int      `yaml:"port"`
 	Token          string   `yaml:"token"`
@@ -38,6 +43,45 @@ type APIConfig struct {
 
 type CleanupConfig struct {
 	DefaultTTL time.Duration `yaml:"default_ttl"`
+}
+
+// Discover searches for a config file in standard locations
+// Search order: current directory, then home directory
+func Discover() (string, error) {
+	// Get current working directory
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	// Get home directory
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "" // Continue without home directory
+	}
+
+	// Search paths in order
+	searchDirs := []string{cwd}
+	if home != "" {
+		searchDirs = append(searchDirs, home, filepath.Join(home, ".config", "pgmanager"))
+	}
+	searchDirs = append(searchDirs, "/etc/pgmanager")
+
+	for _, dir := range searchDirs {
+		for _, name := range ConfigFileNames {
+			path := filepath.Join(dir, name)
+			if _, err := os.Stat(path); err == nil {
+				return path, nil
+			}
+		}
+		// Also check for config.yaml in each directory
+		path := filepath.Join(dir, "config.yaml")
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+
+	return "", fmt.Errorf("no config file found; create pgmanager.yaml in current directory or specify with --config")
 }
 
 func Load(path string) (*Config, error) {
@@ -52,10 +96,7 @@ func Load(path string) (*Config, error) {
 			Port:     5432,
 			User:     "postgres",
 			Database: "postgres",
-			SSLMode:  "require",
-		},
-		SQLite: SQLiteConfig{
-			Path: "data/pgmanager.db",
+			SSLMode:  "disable", // Default to disable for local development
 		},
 		API: APIConfig{
 			Port:         8080,
@@ -87,9 +128,6 @@ func Load(path string) (*Config, error) {
 	}
 	if database := os.Getenv("POSTGRES_DATABASE"); database != "" {
 		cfg.Postgres.Database = database
-	}
-	if sqlitePath := os.Getenv("PGMANAGER_SQLITE_PATH"); sqlitePath != "" {
-		cfg.SQLite.Path = sqlitePath
 	}
 	if apiPort := os.Getenv("PGMANAGER_API_PORT"); apiPort != "" {
 		if p, err := strconv.Atoi(apiPort); err == nil {
@@ -132,10 +170,7 @@ func Default() *Config {
 			Port:     5432,
 			User:     "postgres",
 			Database: "postgres",
-			SSLMode:  "require",
-		},
-		SQLite: SQLiteConfig{
-			Path: "data/pgmanager.db",
+			SSLMode:  "disable",
 		},
 		API: APIConfig{
 			Port:         8080,
@@ -145,4 +180,10 @@ func Default() *Config {
 			DefaultTTL: 7 * 24 * time.Hour,
 		},
 	}
+}
+
+// ConnectionString returns a PostgreSQL connection string
+func (c *PostgresConfig) ConnectionString() string {
+	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		c.Host, c.Port, c.User, c.Password, c.Database, c.SSLMode)
 }
