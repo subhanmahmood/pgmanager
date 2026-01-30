@@ -28,7 +28,7 @@ func main() {
 		Long:  "A tool for managing PostgreSQL databases with project-based organization",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// Skip config loading for help commands
-			if cmd.Name() == "help" || cmd.Name() == "version" {
+			if cmd.Name() == "help" || cmd.Name() == "version" || cmd.Name() == "init" {
 				return nil
 			}
 
@@ -36,16 +36,12 @@ func main() {
 			if cfgFile != "" {
 				cfg, err = config.Load(cfgFile)
 			} else {
-				// Try default locations
-				for _, path := range []string{"config.yaml", "/etc/pgmanager/config.yaml"} {
-					if _, err := os.Stat(path); err == nil {
-						cfg, err = config.Load(path)
-						break
-					}
+				// Auto-discover config file
+				path, discoverErr := config.Discover()
+				if discoverErr != nil {
+					return discoverErr
 				}
-				if cfg == nil {
-					cfg = config.Default()
-				}
+				cfg, err = config.Load(path)
 			}
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
@@ -54,7 +50,7 @@ func main() {
 		},
 	}
 
-	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file path")
+	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file path (default: auto-discover pgmanager.yaml)")
 
 	// Project commands
 	projectCmd := &cobra.Command{
@@ -159,17 +155,32 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(projectCmd, dbCmd, cleanupCmd, serveCmd, tuiCmd, versionCmd)
+	// Init command
+	initCmd := &cobra.Command{
+		Use:   "init",
+		Short: "Create a pgmanager.yaml config file in the current directory",
+		RunE:  runInit,
+	}
+
+	rootCmd.AddCommand(projectCmd, dbCmd, cleanupCmd, serveCmd, tuiCmd, versionCmd, initCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
 }
 
-func getManager() (*project.Manager, *meta.Store, error) {
-	store, err := meta.NewStore(cfg.SQLite.Path)
+func getStore(ctx context.Context) (meta.Store, error) {
+	store, err := meta.NewPostgresStore(ctx, cfg.Postgres.ConnectionString())
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open metadata store: %w", err)
+		return nil, fmt.Errorf("failed to connect to PostgreSQL: %w", err)
+	}
+	return store, nil
+}
+
+func getManager(ctx context.Context) (*project.Manager, meta.Store, error) {
+	store, err := getStore(ctx)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	mgr := project.NewManager(cfg, store)
@@ -177,13 +188,13 @@ func getManager() (*project.Manager, *meta.Store, error) {
 }
 
 func projectCreate(cmd *cobra.Command, args []string) error {
-	mgr, store, err := getManager()
+	ctx := context.Background()
+	mgr, store, err := getManager(ctx)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 
-	ctx := context.Background()
 	if err := mgr.CreateProject(ctx, args[0]); err != nil {
 		return err
 	}
@@ -193,13 +204,13 @@ func projectCreate(cmd *cobra.Command, args []string) error {
 }
 
 func projectList(cmd *cobra.Command, args []string) error {
-	mgr, store, err := getManager()
+	ctx := context.Background()
+	mgr, store, err := getManager(ctx)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 
-	ctx := context.Background()
 	projects, err := mgr.ListProjects(ctx)
 	if err != nil {
 		return err
@@ -220,13 +231,13 @@ func projectList(cmd *cobra.Command, args []string) error {
 }
 
 func projectDelete(cmd *cobra.Command, args []string) error {
-	mgr, store, err := getManager()
+	ctx := context.Background()
+	mgr, store, err := getManager(ctx)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 
-	ctx := context.Background()
 	if err := mgr.DeleteProject(ctx, args[0]); err != nil {
 		return err
 	}
@@ -236,7 +247,8 @@ func projectDelete(cmd *cobra.Command, args []string) error {
 }
 
 func dbCreate(cmd *cobra.Command, args []string) error {
-	mgr, store, err := getManager()
+	ctx := context.Background()
+	mgr, store, err := getManager(ctx)
 	if err != nil {
 		return err
 	}
@@ -257,7 +269,6 @@ func dbCreate(cmd *cobra.Command, args []string) error {
 		prNumber = &num
 	}
 
-	ctx := context.Background()
 	info, err := mgr.CreateDatabase(ctx, projectName, env, prNumber)
 	if err != nil {
 		return err
@@ -275,7 +286,8 @@ func dbCreate(cmd *cobra.Command, args []string) error {
 }
 
 func dbDelete(cmd *cobra.Command, args []string) error {
-	mgr, store, err := getManager()
+	ctx := context.Background()
+	mgr, store, err := getManager(ctx)
 	if err != nil {
 		return err
 	}
@@ -296,7 +308,6 @@ func dbDelete(cmd *cobra.Command, args []string) error {
 		prNumber = &num
 	}
 
-	ctx := context.Background()
 	if err := mgr.DeleteDatabase(ctx, projectName, env, prNumber); err != nil {
 		return err
 	}
@@ -306,7 +317,8 @@ func dbDelete(cmd *cobra.Command, args []string) error {
 }
 
 func dbList(cmd *cobra.Command, args []string) error {
-	mgr, store, err := getManager()
+	ctx := context.Background()
+	mgr, store, err := getManager(ctx)
 	if err != nil {
 		return err
 	}
@@ -317,7 +329,6 @@ func dbList(cmd *cobra.Command, args []string) error {
 		projectName = args[0]
 	}
 
-	ctx := context.Background()
 	databases, err := mgr.ListDatabases(ctx, projectName)
 	if err != nil {
 		return err
@@ -343,7 +354,8 @@ func dbList(cmd *cobra.Command, args []string) error {
 }
 
 func dbInfo(cmd *cobra.Command, args []string) error {
-	mgr, store, err := getManager()
+	ctx := context.Background()
+	mgr, store, err := getManager(ctx)
 	if err != nil {
 		return err
 	}
@@ -364,7 +376,6 @@ func dbInfo(cmd *cobra.Command, args []string) error {
 		prNumber = &num
 	}
 
-	ctx := context.Background()
 	info, err := mgr.GetDatabase(ctx, projectName, env, prNumber)
 	if err != nil {
 		return err
@@ -384,7 +395,8 @@ func dbInfo(cmd *cobra.Command, args []string) error {
 }
 
 func cleanup(olderThan string) error {
-	mgr, store, err := getManager()
+	ctx := context.Background()
+	mgr, store, err := getManager(ctx)
 	if err != nil {
 		return err
 	}
@@ -395,7 +407,6 @@ func cleanup(olderThan string) error {
 		return fmt.Errorf("invalid duration: %w", err)
 	}
 
-	ctx := context.Background()
 	deleted, err := mgr.Cleanup(ctx, duration)
 	if err != nil {
 		return err
@@ -414,9 +425,10 @@ func cleanup(olderThan string) error {
 }
 
 func serve(port int) error {
-	store, err := meta.NewStore(cfg.SQLite.Path)
+	ctx := context.Background()
+	store, err := getStore(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to open metadata store: %w", err)
+		return err
 	}
 
 	mgr := project.NewManager(cfg, store)
@@ -427,9 +439,10 @@ func serve(port int) error {
 }
 
 func runTUI(cmd *cobra.Command, args []string) error {
-	store, err := meta.NewStore(cfg.SQLite.Path)
+	ctx := context.Background()
+	store, err := getStore(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to open metadata store: %w", err)
+		return err
 	}
 	defer store.Close()
 
@@ -463,4 +476,47 @@ func parseDuration(s string) (time.Duration, error) {
 	default:
 		return 0, fmt.Errorf("unknown unit: %c", unit)
 	}
+}
+
+func runInit(cmd *cobra.Command, args []string) error {
+	configContent := `# pgmanager configuration
+# Metadata is stored in the PostgreSQL server itself (in the pgmanager schema)
+
+postgres:
+  host: localhost
+  port: 5432
+  user: postgres
+  password: ""
+  database: postgres
+  ssl_mode: disable  # disable, require, verify-ca, verify-full
+
+# API server config (for 'pgmanager serve')
+api:
+  port: 8080
+  token: ""           # Set for API authentication
+  require_token: true
+
+# Cleanup settings
+cleanup:
+  default_ttl: 168h   # 7 days for PR databases
+`
+
+	// Check if config already exists
+	for _, name := range config.ConfigFileNames {
+		if _, err := os.Stat(name); err == nil {
+			return fmt.Errorf("config file already exists: %s", name)
+		}
+	}
+
+	// Write config file
+	filename := "pgmanager.yaml"
+	if err := os.WriteFile(filename, []byte(configContent), 0644); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	fmt.Printf("Created %s\n", filename)
+	fmt.Println("\nEdit the file to set your PostgreSQL connection details.")
+	fmt.Println("Environment variables can override config values:")
+	fmt.Println("  POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD")
+	return nil
 }

@@ -26,6 +26,18 @@ chmod +x pgmanager
 sudo mv pgmanager /usr/local/bin/
 ```
 
+### Quick Start
+
+```bash
+# Initialize config in your project directory
+pgmanager init
+
+# Edit pgmanager.yaml with your PostgreSQL connection details
+# Then create a project and database
+pgmanager project create myproject
+pgmanager db create myproject dev
+```
+
 ### CI Usage
 
 ```yaml
@@ -34,7 +46,10 @@ sudo mv pgmanager /usr/local/bin/
   run: curl -sSL https://raw.githubusercontent.com/subhanmahmood/pgmanager/master/install.sh | bash
 
 - name: Create PR database
-  run: pgmanager --config config.yaml db create myproject pr ${{ github.event.pull_request.number }}
+  run: pgmanager db create myproject pr ${{ github.event.pull_request.number }}
+  env:
+    POSTGRES_HOST: ${{ secrets.POSTGRES_HOST }}
+    POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
 ```
 
 ## Build & Test Commands
@@ -73,42 +88,56 @@ docker build -t pgmanager:latest .
 ## Running the Application
 
 ```bash
-# CLI commands (always specify config)
-./pgmanager --config config.yaml project list
-./pgmanager --config config.yaml db create myproject dev
+# Initialize config in current directory
+./pgmanager init
+
+# CLI commands (auto-discovers pgmanager.yaml in current directory)
+./pgmanager project list
+./pgmanager db create myproject dev
+
+# Or specify config explicitly
+./pgmanager --config /path/to/pgmanager.yaml project list
 
 # Start REST API server
-./pgmanager --config config.yaml serve -p 8080
+./pgmanager serve -p 8080
 
 # Start terminal UI
-./pgmanager --config config.yaml tui
+./pgmanager tui
 ```
+
+### Config File Discovery
+
+pgmanager automatically searches for config files in this order:
+1. Current directory: `pgmanager.yaml`, `pgmanager.yml`, `.pgmanager.yaml`, `.pgmanager.yml`, `config.yaml`
+2. Home directory: `~/pgmanager.yaml`, `~/.config/pgmanager/`
+3. System: `/etc/pgmanager/`
 
 ### Running via Docker
 
 ```bash
 # Run any command via Docker
-docker run --rm -v "$(pwd)/config.yaml:/etc/pgmanager/config.yaml" \
-  pgmanager:latest pgmanager --config /etc/pgmanager/config.yaml project list
+docker run --rm -v "$(pwd)/pgmanager.yaml:/etc/pgmanager/pgmanager.yaml" \
+  pgmanager:latest pgmanager project list
 
 # Start API server with port mapping
-docker run --rm -p 8080:8080 -v "$(pwd)/config.yaml:/etc/pgmanager/config.yaml" \
-  pgmanager:latest pgmanager --config /etc/pgmanager/config.yaml serve -p 8080
+docker run --rm -p 8080:8080 -v "$(pwd)/pgmanager.yaml:/etc/pgmanager/pgmanager.yaml" \
+  pgmanager:latest pgmanager serve -p 8080
 ```
 
 ## Architecture
 
-pgmanager is a PostgreSQL database management tool with project-based organization. It uses dual storage: PostgreSQL for actual databases/users and SQLite for metadata tracking.
+pgmanager is a PostgreSQL database management tool with project-based organization. All metadata is stored directly in PostgreSQL (in a `pgmanager` schema), making it fully stateless and shareable across machines and CI environments.
 
 ### Layer Structure
 
 - **cmd/pgmanager/main.go** - CLI entry point with all Cobra commands defined
 - **internal/project/project.go** - Core business logic (Manager struct orchestrates all operations)
 - **internal/db/postgres.go** - PostgreSQL operations (create/drop databases and users via pgx)
-- **internal/meta/sqlite.go** - Metadata persistence (projects, database records, TTL tracking)
+- **internal/meta/postgres.go** - Metadata persistence in PostgreSQL (projects, database records, TTL tracking)
+- **internal/meta/store.go** - Store interface definition
 - **internal/api/** - REST API server using chi router with Bearer token auth
 - **internal/tui/app.go** - Terminal UI using Bubble Tea
-- **internal/config/config.go** - YAML config with environment variable overrides
+- **internal/config/config.go** - YAML config with environment variable overrides and auto-discovery
 
 ### Key Design Patterns
 
@@ -123,11 +152,12 @@ pgmanager is a PostgreSQL database management tool with project-based organizati
 
 Config loaded from YAML with environment variable overrides:
 - `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DATABASE` - PostgreSQL connection
-- `POSTGRES_SSLMODE` - SSL mode for PostgreSQL (disable, require, verify-ca, verify-full). Defaults to `require`
+- `POSTGRES_SSLMODE` - SSL mode for PostgreSQL (disable, require, verify-ca, verify-full). Defaults to `disable` for local development
 - `PGMANAGER_API_PORT`, `PGMANAGER_API_TOKEN` - API server settings
 - `PGMANAGER_REQUIRE_TOKEN` - Set to `true` to require API authentication (default: true)
 - `PGMANAGER_ALLOWED_ORIGINS` - Comma-separated list of allowed CORS origins
-- `PGMANAGER_SQLITE_PATH` - SQLite database location
+
+Note: All metadata (projects, databases) is stored in the PostgreSQL server itself in a `pgmanager` schema. This means any machine with the same PostgreSQL connection can see and manage the same projects.
 
 ## Testing Patterns
 

@@ -37,9 +37,9 @@ var (
 
 // Manager handles project and database operations
 type Manager struct {
-	cfg    *config.Config
-	pg     *db.PostgresClient
-	store  *meta.Store
+	cfg   *config.Config
+	pg    *db.PostgresClient
+	store meta.Store
 }
 
 // DatabaseInfo contains information about a database
@@ -58,7 +58,7 @@ type DatabaseInfo struct {
 }
 
 // NewManager creates a new project manager
-func NewManager(cfg *config.Config, store *meta.Store) *Manager {
+func NewManager(cfg *config.Config, store meta.Store) *Manager {
 	return &Manager{
 		cfg:   cfg,
 		pg:    db.NewPostgresClient(&cfg.Postgres),
@@ -111,7 +111,7 @@ func (m *Manager) CreateProject(ctx context.Context, name string) error {
 	}
 
 	// Check if project already exists
-	existing, err := m.store.GetProject(name)
+	existing, err := m.store.GetProject(ctx, name)
 	if err != nil {
 		return fmt.Errorf("failed to check project: %w", err)
 	}
@@ -119,7 +119,7 @@ func (m *Manager) CreateProject(ctx context.Context, name string) error {
 		return fmt.Errorf("project '%s' already exists", name)
 	}
 
-	_, err = m.store.CreateProject(name)
+	_, err = m.store.CreateProject(ctx, name)
 	if err != nil {
 		return fmt.Errorf("failed to create project: %w", err)
 	}
@@ -129,13 +129,13 @@ func (m *Manager) CreateProject(ctx context.Context, name string) error {
 
 // ListProjects returns all projects
 func (m *Manager) ListProjects(ctx context.Context) ([]meta.Project, error) {
-	return m.store.ListProjects()
+	return m.store.ListProjects(ctx)
 }
 
 // DeleteProject deletes a project and all its databases
 func (m *Manager) DeleteProject(ctx context.Context, name string) error {
 	// Get all databases for this project
-	databases, err := m.store.DeleteProject(name)
+	databases, err := m.store.DeleteProject(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -162,7 +162,7 @@ func (m *Manager) CreateDatabase(ctx context.Context, projectName, env string, p
 	}
 
 	// Get project
-	project, err := m.store.GetProject(projectName)
+	project, err := m.store.GetProject(ctx, projectName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get project: %w", err)
 	}
@@ -171,7 +171,7 @@ func (m *Manager) CreateDatabase(ctx context.Context, projectName, env string, p
 	}
 
 	// Check if database already exists
-	existing, err := m.store.GetDatabase(project.ID, env, prNumber)
+	existing, err := m.store.GetDatabase(ctx, project.ID, env, prNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check database: %w", err)
 	}
@@ -197,7 +197,7 @@ func (m *Manager) CreateDatabase(ctx context.Context, projectName, env string, p
 	}
 
 	// Store metadata
-	dbRecord, err := m.store.CreateDatabase(project.ID, dbName, userName, password, env, prNumber, expiresAt)
+	dbRecord, err := m.store.CreateDatabase(ctx, project.ID, dbName, userName, password, env, prNumber, expiresAt)
 	if err != nil {
 		// Try to clean up the PostgreSQL database
 		_ = m.pg.DropDatabase(ctx, dbName, userName)
@@ -226,7 +226,7 @@ func (m *Manager) GetDatabase(ctx context.Context, projectName, env string, prNu
 	}
 
 	// Get project
-	project, err := m.store.GetProject(projectName)
+	project, err := m.store.GetProject(ctx, projectName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get project: %w", err)
 	}
@@ -235,7 +235,7 @@ func (m *Manager) GetDatabase(ctx context.Context, projectName, env string, prNu
 	}
 
 	// Get database
-	dbRecord, err := m.store.GetDatabase(project.ID, env, prNumber)
+	dbRecord, err := m.store.GetDatabase(ctx, project.ID, env, prNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get database: %w", err)
 	}
@@ -268,16 +268,16 @@ func (m *Manager) ListDatabases(ctx context.Context, projectName string) ([]Data
 	var err error
 
 	if projectName == "" {
-		databases, err = m.store.ListAllDatabases()
+		databases, err = m.store.ListAllDatabases(ctx)
 	} else {
-		project, err := m.store.GetProject(projectName)
+		project, err := m.store.GetProject(ctx, projectName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get project: %w", err)
 		}
 		if project == nil {
 			return nil, fmt.Errorf("project '%s' not found", projectName)
 		}
-		databases, err = m.store.ListDatabases(project.ID)
+		databases, err = m.store.ListDatabases(ctx, project.ID)
 	}
 
 	if err != nil {
@@ -292,7 +292,7 @@ func (m *Manager) ListDatabases(ctx context.Context, projectName string) ([]Data
 		// Get project name
 		projectNameStr, ok := projectCache[dbItem.ProjectID]
 		if !ok {
-			projects, _ := m.store.ListProjects()
+			projects, _ := m.store.ListProjects(ctx)
 			for _, p := range projects {
 				projectCache[p.ID] = p.Name
 			}
@@ -324,7 +324,7 @@ func (m *Manager) DeleteDatabase(ctx context.Context, projectName, env string, p
 	}
 
 	// Get project
-	project, err := m.store.GetProject(projectName)
+	project, err := m.store.GetProject(ctx, projectName)
 	if err != nil {
 		return fmt.Errorf("failed to get project: %w", err)
 	}
@@ -333,7 +333,7 @@ func (m *Manager) DeleteDatabase(ctx context.Context, projectName, env string, p
 	}
 
 	// Get database
-	dbRecord, err := m.store.GetDatabase(project.ID, env, prNumber)
+	dbRecord, err := m.store.GetDatabase(ctx, project.ID, env, prNumber)
 	if err != nil {
 		return fmt.Errorf("failed to get database: %w", err)
 	}
@@ -347,7 +347,7 @@ func (m *Manager) DeleteDatabase(ctx context.Context, projectName, env string, p
 	}
 
 	// Delete metadata
-	if err := m.store.DeleteDatabase(dbRecord.Name); err != nil {
+	if err := m.store.DeleteDatabase(ctx, dbRecord.Name); err != nil {
 		return fmt.Errorf("failed to delete database metadata: %w", err)
 	}
 
@@ -359,13 +359,13 @@ func (m *Manager) Cleanup(ctx context.Context, olderThan time.Duration) ([]strin
 	var deleted []string
 
 	// Get expired databases
-	expired, err := m.store.GetExpiredDatabases()
+	expired, err := m.store.GetExpiredDatabases(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get expired databases: %w", err)
 	}
 
 	// Get old PR databases
-	oldPR, err := m.store.GetDatabasesOlderThan("pr", olderThan)
+	oldPR, err := m.store.GetDatabasesOlderThan(ctx, "pr", olderThan)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get old PR databases: %w", err)
 	}
@@ -386,7 +386,7 @@ func (m *Manager) Cleanup(ctx context.Context, olderThan time.Duration) ([]strin
 			continue
 		}
 
-		if err := m.store.DeleteDatabase(dbRecord.Name); err != nil {
+		if err := m.store.DeleteDatabase(ctx, dbRecord.Name); err != nil {
 			fmt.Printf("Warning: failed to delete metadata for %s: %v\n", dbRecord.Name, err)
 			continue
 		}
