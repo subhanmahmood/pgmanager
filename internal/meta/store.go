@@ -19,8 +19,8 @@ type Database struct {
 	Name      string
 	UserName  string
 	Password  string
-	Env       string     // prod, dev, staging, pr
-	PRNumber  *int       // Only set for PR databases
+	Env       string // prod, dev, staging, pr
+	PRNumber  *int   // Only set for PR databases
 	CreatedAt time.Time
 	ExpiresAt *time.Time // TTL for PR databases
 }

@@ -45,17 +45,17 @@ const (
 )
 
 type model struct {
-	mgr           *project.Manager
-	projects      []meta.Project
-	databases     []project.DatabaseInfo
-	selectedDB    *project.DatabaseInfo
-	cursor        int
-	currentView   view
+	mgr            *project.Manager
+	projects       []meta.Project
+	databases      []project.DatabaseInfo
+	selectedDB     *project.DatabaseInfo
+	cursor         int
+	currentView    view
 	currentProject string
-	err           error
-	message       string
-	width         int
-	height        int
+	err            error
+	message        string
+	width          int
+	height         int
 }
 
 func initialModel(mgr *project.Manager) model {

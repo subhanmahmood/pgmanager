@@ -111,11 +111,11 @@ func TestUserName(t *testing.T) {
 
 func TestParseEnv(t *testing.T) {
 	tests := []struct {
-		name       string
-		input      string
-		wantEnv    string
-		wantPR     *int
-		wantErr    bool
+		name    string
+		input   string
+		wantEnv string
+		wantPR  *int
+		wantErr bool
 	}{
 		{"prod environment", "prod", "prod", nil, false},
 		{"dev environment", "dev", "dev", nil, false},
