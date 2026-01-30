@@ -37,7 +37,8 @@ jobs:
           if [ "$GOARCH" = "arm64" ]; then
             export CC=aarch64-linux-gnu-gcc
           fi
-          go build -ldflags="-s -w" -o pgmanager-linux-${{ matrix.goarch }} ./cmd/pgmanager
+          VERSION=${GITHUB_REF#refs/tags/}
+          go build -ldflags="-s -w -X main.Version=$VERSION" -o pgmanager-linux-${{ matrix.goarch }} ./cmd/pgmanager
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,7 +65,8 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 1
         run: |
-          go build -ldflags="-s -w" -o pgmanager-darwin-${{ matrix.goarch }} ./cmd/pgmanager
+          VERSION=${GITHUB_REF#refs/tags/}
+          go build -ldflags="-s -w -X main.Version=$VERSION" -o pgmanager-darwin-${{ matrix.goarch }} ./cmd/pgmanager
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

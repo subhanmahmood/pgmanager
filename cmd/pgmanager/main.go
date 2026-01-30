@@ -17,6 +17,9 @@ import (
 )
 
 var (
+	// Version is set at build time via ldflags
+	Version = "dev"
+
 	cfgFile string
 	cfg     *config.Config
 )
@@ -151,7 +154,7 @@ func main() {
 		Use:   "version",
 		Short: "Print version information",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println("pgmanager v1.0.0")
+			fmt.Printf("pgmanager %s\n", Version)
 		},
 	}
 
