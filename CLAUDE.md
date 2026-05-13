@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## What pgmanager is
+
+A small Go service + CLI for creating, listing, and deleting PostgreSQL databases per project. There are two ways to use it:
+
+1. **API mode (default for laptops + CI)** — talk to a remote `pgmanager serve` over HTTPS with a scoped bearer token. The remote VPS holds the Postgres credentials; clients only hold a token.
+2. **Local mode (for admin work and local dev)** — the CLI connects directly to Postgres. Used by `pgmanager serve` itself, and as an opt-in profile for local development.
+
+All metadata (projects, databases, tokens) lives in a `pgmanager` schema inside the same Postgres server. DB passwords are AES-GCM encrypted at rest with an operator-supplied key.
+
 ## Installation
 
 ### Quick install (Linux/macOS)
@@ -12,153 +21,193 @@ curl -sSL https://raw.githubusercontent.com/subhanmahmood/pgmanager/master/insta
 
 ### Manual install
 
-Download the binary for your platform from [GitHub Releases](https://github.com/subhanmahmood/pgmanager/releases):
+Download the binary for your platform from [GitHub Releases](https://github.com/subhanmahmood/pgmanager/releases).
 
-- `pgmanager-linux-amd64` - Linux x86_64
-- `pgmanager-linux-arm64` - Linux ARM64
-- `pgmanager-darwin-amd64` - macOS Intel
-- `pgmanager-darwin-arm64` - macOS Apple Silicon
+## Quick start — laptop (API mode)
 
 ```bash
-# Example for Linux amd64
-curl -sSL https://github.com/subhanmahmood/pgmanager/releases/latest/download/pgmanager-linux-amd64 -o pgmanager
-chmod +x pgmanager
-sudo mv pgmanager /usr/local/bin/
+pgmanager login https://pgm.example.com
+# paste the bootstrap admin token (printed once on the VPS at first boot)
+
+pgmanager auth whoami        # confirm
+pgmanager project create myapp
+pgmanager db create myapp dev
 ```
 
-### Quick Start
+## Quick start — server (running it on a VPS)
+
+The expected deploy is `examples/deploy/`: docker-compose with Caddy in front for automatic HTTPS. See `examples/deploy/README.md`.
+
+Manual:
 
 ```bash
-# Initialize config in your project directory
-pgmanager init
-
-# Edit pgmanager.yaml with your PostgreSQL connection details
-# Then create a project and database
-pgmanager project create myproject
-pgmanager db create myproject dev
+pgmanager init --mode=server         # writes pgmanager.yaml + a fresh encryption key
+# edit pgmanager.yaml: set postgres.password
+export PGMANAGER_ENCRYPTION_KEY=$(pgmanager keygen)  # or move crypto.key out of YAML
+pgmanager serve
+# First boot writes the admin token to $PGMANAGER_DATA_DIR/bootstrap-token.txt (mode 0600)
 ```
 
-### CI Usage
+`pgmanager serve` binds to `127.0.0.1:8080` by default — put a reverse proxy (Caddy/nginx/Traefik) in front for TLS. Use `--listen 0.0.0.0:8080` to expose it directly (not recommended for the public internet).
+
+## CI usage
+
+CI never holds Postgres credentials. It only needs `(api_url, scoped_token)`:
 
 ```yaml
-# GitHub Actions example
 - name: Install pgmanager
   run: curl -sSL https://raw.githubusercontent.com/subhanmahmood/pgmanager/master/install.sh | bash
 
 - name: Create PR database
-  run: pgmanager db create myproject pr ${{ github.event.pull_request.number }}
+  run: pgmanager db create myapp pr "${{ github.event.pull_request.number }}" --json > db.json
   env:
-    POSTGRES_HOST: ${{ secrets.POSTGRES_HOST }}
-    POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+    PGMANAGER_API_URL: ${{ vars.PGMANAGER_API_URL }}
+    PGMANAGER_API_TOKEN: ${{ secrets.PGMANAGER_CI_TOKEN }}   # scope: project:myapp:pr:*
+
+- name: Expose DATABASE_URL to subsequent steps
+  run: echo "DATABASE_URL=$(jq -r .connection_string db.json)" >> $GITHUB_ENV
 ```
+
+Create the scoped token on your laptop (or wherever your admin token lives):
+
+```bash
+pgmanager auth create-token \
+  --name "github-ci-myapp" \
+  --scope "project:myapp:pr:*" \
+  --expires 90d
+```
+
+A leaked CI token can only create/delete PR databases in one project — it cannot touch prod, other projects, or admin endpoints.
 
 ## Build & Test Commands
 
 ### With Go installed locally
 
 ```bash
-# Run all tests
-go test ./...
-
-# Run tests with verbose output
-go test -v ./internal/...
-
-# Run a specific test
+go test ./...                          # all tests
+go test -v ./internal/...              # verbose
 go test -run TestValidateName ./internal/project
-
-# Build binary
 go build -o pgmanager ./cmd/pgmanager
 ```
 
 ### With Docker (preferred if Go not installed)
 
 ```bash
-# Run all tests via Docker
 docker run --rm -v "$(pwd):/app" -w /app golang:1.23-alpine \
   sh -c "apk add --no-cache gcc musl-dev && go test ./..."
 
-# Run tests with verbose output via Docker
-docker run --rm -v "$(pwd):/app" -w /app golang:1.23-alpine \
-  sh -c "apk add --no-cache gcc musl-dev && go test -v ./internal/..."
-
-# Build Docker image
 docker build -t pgmanager:latest .
 ```
 
-## Running the Application
+## Config files & precedence
 
-```bash
-# Initialize config in current directory
-./pgmanager init
+There are **two** config files; they serve different audiences and never mix.
 
-# CLI commands (auto-discovers pgmanager.yaml in current directory)
-./pgmanager project list
-./pgmanager db create myproject dev
+### `pgmanager.yaml` (server-side, used by `pgmanager serve`)
 
-# Or specify config explicitly
-./pgmanager --config /path/to/pgmanager.yaml project list
+Auto-discovered in this order: cwd → `~` → `~/.config/pgmanager/` → `/etc/pgmanager/`. Filenames searched: `pgmanager.yaml`, `pgmanager.yml`, `.pgmanager.yaml`, `.pgmanager.yml`, `config.yaml`.
 
-# Start REST API server
-./pgmanager serve -p 8080
+Key fields:
 
-# Start terminal UI
-./pgmanager tui
+```yaml
+postgres:        # how serve connects to Postgres
+  host: localhost
+  port: 5432
+  user: postgres
+  password: ""
+  database: postgres
+  ssl_mode: require       # use 'disable' only for local development
+api:
+  listen: 127.0.0.1:8080  # bind address; put a proxy in front for TLS
+  require_token: true
+crypto:
+  key: ""                 # base64, 32 bytes — `pgmanager keygen` to create one
+  # key_file: /run/secrets/pgmanager_key  # alternative
+data_dir: /var/lib/pgmanager
+cleanup:
+  default_ttl: 168h
 ```
 
-### Config File Discovery
+### `credentials.yaml` (client-side, used by every other command)
 
-pgmanager automatically searches for config files in this order:
-1. Current directory: `pgmanager.yaml`, `pgmanager.yml`, `.pgmanager.yaml`, `.pgmanager.yml`, `config.yaml`
-2. Home directory: `~/pgmanager.yaml`, `~/.config/pgmanager/`
-3. System: `/etc/pgmanager/`
+Stored at `$XDG_CONFIG_HOME/pgmanager/credentials.yaml` (default `~/.config/pgmanager/credentials.yaml`), mode `0600`. Holds named profiles:
 
-### Running via Docker
-
-```bash
-# Run any command via Docker
-docker run --rm -v "$(pwd)/pgmanager.yaml:/etc/pgmanager/pgmanager.yaml" \
-  pgmanager:latest pgmanager project list
-
-# Start API server with port mapping
-docker run --rm -p 8080:8080 -v "$(pwd)/pgmanager.yaml:/etc/pgmanager/pgmanager.yaml" \
-  pgmanager:latest pgmanager serve -p 8080
+```yaml
+current: prod
+profiles:
+  prod:
+    api_url: https://pgm.example.com
+    token: pgm_live_xxxxxxxxxxxxxxxx
+  local:
+    postgres:
+      host: localhost
+      port: 5432
+      user: postgres
+      password: postgres
+      ssl_mode: disable
+    crypto:
+      key: base64+32bytes
 ```
+
+Managed via `pgmanager login / logout / profile use / profile show`.
+
+### Precedence (highest wins)
+
+1. CLI flags (`--config`, `--profile`).
+2. `PGMANAGER_API_URL` + `PGMANAGER_API_TOKEN` env vars (synthesizes an `env` profile, bypasses the file entirely — this is the CI path).
+3. `PGMANAGER_PROFILE` env var.
+4. `current:` in `credentials.yaml`.
+5. `pgmanager.yaml` (server-side only).
+
+### Useful env vars
+
+- `POSTGRES_*` — override server-side `postgres.*` fields.
+- `POSTGRES_SSLMODE` — disable, require, verify-ca, verify-full (default: disable).
+- `PGMANAGER_LISTEN` — server bind address.
+- `PGMANAGER_REQUIRE_TOKEN` — `true` to require auth (default true).
+- `PGMANAGER_ALLOWED_ORIGINS` — comma-separated CORS list.
+- `PGMANAGER_ENCRYPTION_KEY` — base64 32-byte key for at-rest encryption.
+- `PGMANAGER_DATA_DIR` — where the bootstrap-token file is written.
+- `PGMANAGER_BOOTSTRAP_TOKEN` — operator-supplied initial admin token (skip auto-generation).
+- `PGMANAGER_API_URL` / `PGMANAGER_API_TOKEN` — client-side; bypass profile file.
+- `PGMANAGER_PROFILE` — pick a saved profile by name.
 
 ## Architecture
 
-pgmanager is a PostgreSQL database management tool with project-based organization. All metadata is stored directly in PostgreSQL (in a `pgmanager` schema), making it fully stateless and shareable across machines and CI environments.
+### Layer structure
 
-### Layer Structure
+- `cmd/pgmanager/main.go` — Cobra CLI; resolves a profile, constructs a `client.Client`, and dispatches.
+- `internal/client/` — `Client` interface plus `HTTPClient` (talks to `pgmanager serve`) and `LocalClient` (wraps `project.Manager` for direct-Postgres).
+- `internal/project/project.go` — core business logic. The implementation behind every API handler and the local client.
+- `internal/db/postgres.go` — actual `CREATE DATABASE`/`CREATE USER`/`DROP …` operations via pgx.
+- `internal/meta/postgres.go` — metadata persistence (projects, databases, tokens). Encrypts/decrypts DB passwords using the key passed to `NewPostgresStore`. Idempotent schema migration.
+- `internal/meta/store.go` — Store interface; `mock.go` is the in-memory implementation used in tests.
+- `internal/api/` — HTTP server, auth middleware, scoped-token enforcement, audit log.
+- `internal/auth/token.go` — token generation, SHA-256 hashing, scope grammar and authorization.
+- `internal/crypto/aesgcm.go` — AES-256-GCM for at-rest secrets.
+- `internal/config/config.go` — server config (`pgmanager.yaml`) loader.
+- `internal/config/client.go` — client config (`credentials.yaml`) loader + profile resolution.
+- `internal/tui/app.go` — Bubble Tea terminal UI; uses `client.Client`, so it works against either transport.
 
-- **cmd/pgmanager/main.go** - CLI entry point with all Cobra commands defined
-- **internal/project/project.go** - Core business logic (Manager struct orchestrates all operations)
-- **internal/db/postgres.go** - PostgreSQL operations (create/drop databases and users via pgx)
-- **internal/meta/postgres.go** - Metadata persistence in PostgreSQL (projects, database records, TTL tracking)
-- **internal/meta/store.go** - Store interface definition
-- **internal/api/** - REST API server using chi router with Bearer token auth
-- **internal/tui/app.go** - Terminal UI using Bubble Tea
-- **internal/config/config.go** - YAML config with environment variable overrides and auto-discovery
+### Key design rules
 
-### Key Design Patterns
+- Project names: regex `^[a-z][a-z0-9_]*$`, length 2–32. Reserved: `postgres`, `template0`, `template1`, `admin`, `root`, `system`.
+- Environments: `prod`, `dev`, `staging`, `pr`.
+- Database naming: `{project}_{env}` or `{project}_pr_{number}`.
+- PR DBs get a TTL (default 7 days); `pgmanager cleanup` removes expired ones.
+- Token format: `pgm_live_<32 url-safe bytes>`. Only SHA-256 stored. Display prefix is the first 16 chars.
+- SQL injection prevention everywhere via `pgx.Identifier{}.Sanitize()` and `quoteLiteral` for passwords.
+- DB passwords in metadata are AES-GCM encrypted; the key never lives in the DB.
 
-- Project names validated via regex `^[a-z][a-z0-9_]*$` (2-32 chars)
-- Reserved project names: `postgres`, `template0`, `template1`, `admin`, `root`, `system`
-- Four environments supported: `prod`, `dev`, `staging`, `pr`
-- Database naming: `{project}_{env}` or `{project}_pr_{number}`
-- PR databases have TTL-based expiration (default 7 days)
-- SQL injection prevention via `pgx.Identifier` sanitization
+### Scope grammar
 
-### Configuration
+- `admin` — everything.
+- `tokens` — only token CRUD (no DB access).
+- `project:*` — all projects, all envs.
+- `project:<name>` — one project, all envs.
+- `project:<name>:env:<env>` — one project, one env (e.g. `dev`).
+- `project:<name>:pr:*` — one project, only PR DBs (the CI scope).
 
-Config loaded from YAML with environment variable overrides:
-- `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DATABASE` - PostgreSQL connection
-- `POSTGRES_SSLMODE` - SSL mode for PostgreSQL (disable, require, verify-ca, verify-full). Defaults to `disable` for local development
-- `PGMANAGER_API_PORT`, `PGMANAGER_API_TOKEN` - API server settings
-- `PGMANAGER_REQUIRE_TOKEN` - Set to `true` to require API authentication (default: true)
-- `PGMANAGER_ALLOWED_ORIGINS` - Comma-separated list of allowed CORS origins
+## Testing patterns
 
-Note: All metadata (projects, databases) is stored in the PostgreSQL server itself in a `pgmanager` schema. This means any machine with the same PostgreSQL connection can see and manage the same projects.
-
-## Testing Patterns
-
-Tests use table-driven pattern. When adding tests, follow the existing style in `*_test.go` files. Tests for validation logic are in `internal/project/project_test.go`, HTTP handlers in `internal/api/handlers_test.go`.
+Tests are table-driven. The mock store (`internal/meta/mock.go`) is used by API and project tests; it satisfies the same `Store` interface as `PostgresStore`. When adding tests that exercise authentication, seed an admin token into the mock store and pass it as `Authorization: Bearer <plain>` — see `internal/api/handlers_test.go` `setupTestServer`.

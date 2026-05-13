@@ -1,0 +1,11 @@
+# Caddy fronts pgmanager with automatic HTTPS via Let's Encrypt.
+# `pgmanager` listens on :8080 inside the docker network only.
+
+{$PGMANAGER_API_DOMAIN} {
+    encode zstd gzip
+
+    reverse_proxy pgmanager:8080 {
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-For   {remote_host}
+    }
+}

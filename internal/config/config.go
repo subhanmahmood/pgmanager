@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,7 +12,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ConfigFileNames are the names to search for when auto-discovering config
+// ConfigFileNames are the names to search for when auto-discovering the
+// server config (pgmanager.yaml).
 var ConfigFileNames = []string{
 	"pgmanager.yaml",
 	"pgmanager.yml",
@@ -19,10 +21,14 @@ var ConfigFileNames = []string{
 	".pgmanager.yml",
 }
 
+// Config is the server-side configuration loaded by `pgmanager serve`.
+// Client-side configuration (profiles, API tokens) lives in ClientConfig.
 type Config struct {
 	Postgres PostgresConfig `yaml:"postgres"`
 	API      APIConfig      `yaml:"api"`
 	Cleanup  CleanupConfig  `yaml:"cleanup"`
+	Crypto   CryptoConfig   `yaml:"crypto"`
+	DataDir  string         `yaml:"data_dir"`
 }
 
 type PostgresConfig struct {
@@ -35,9 +41,10 @@ type PostgresConfig struct {
 }
 
 type APIConfig struct {
-	Port           int      `yaml:"port"`
-	Token          string   `yaml:"token"`
-	RequireToken   bool     `yaml:"require_token"`   // If true, API requires authentication even if token is empty
+	Listen         string   `yaml:"listen"`          // bind address, e.g., "127.0.0.1:8080"
+	Port           int      `yaml:"port"`            // legacy; used if Listen is empty
+	Token          string   `yaml:"token"`           // deprecated; use scoped tokens
+	RequireToken   bool     `yaml:"require_token"`   // if true, refuse to start without auth
 	AllowedOrigins []string `yaml:"allowed_origins"` // CORS allowed origins
 }
 
@@ -45,22 +52,26 @@ type CleanupConfig struct {
 	DefaultTTL time.Duration `yaml:"default_ttl"`
 }
 
-// Discover searches for a config file in standard locations
-// Search order: current directory, then home directory
+// CryptoConfig holds at-rest encryption settings. The key may be supplied
+// inline (Key) or via a file path (KeyFile). PGMANAGER_ENCRYPTION_KEY env
+// always wins.
+type CryptoConfig struct {
+	Key     string `yaml:"key"`      // base64-encoded 32-byte key
+	KeyFile string `yaml:"key_file"` // optional path to a file containing the key
+}
+
+// Discover searches for a server config file in standard locations.
 func Discover() (string, error) {
-	// Get current working directory
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("failed to get working directory: %w", err)
 	}
 
-	// Get home directory
 	home, err := os.UserHomeDir()
 	if err != nil {
-		home = "" // Continue without home directory
+		home = ""
 	}
 
-	// Search paths in order
 	searchDirs := []string{cwd}
 	if home != "" {
 		searchDirs = append(searchDirs, home, filepath.Join(home, ".config", "pgmanager"))
@@ -74,7 +85,6 @@ func Discover() (string, error) {
 				return path, nil
 			}
 		}
-		// Also check for config.yaml in each directory
 		path := filepath.Join(dir, "config.yaml")
 		if _, err := os.Stat(path); err == nil {
 			return path, nil
@@ -90,28 +100,17 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
-	cfg := &Config{
-		Postgres: PostgresConfig{
-			Host:     "localhost",
-			Port:     5432,
-			User:     "postgres",
-			Database: "postgres",
-			SSLMode:  "disable", // Default to disable for local development
-		},
-		API: APIConfig{
-			Port:         8080,
-			RequireToken: true,
-		},
-		Cleanup: CleanupConfig{
-			DefaultTTL: 7 * 24 * time.Hour,
-		},
-	}
+	cfg := Default()
 
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
 
-	// Override with environment variables
+	applyEnvOverrides(cfg)
+	return cfg, nil
+}
+
+func applyEnvOverrides(cfg *Config) {
 	if host := os.Getenv("POSTGRES_HOST"); host != "" {
 		cfg.Postgres.Host = host
 	}
@@ -129,6 +128,12 @@ func Load(path string) (*Config, error) {
 	if database := os.Getenv("POSTGRES_DATABASE"); database != "" {
 		cfg.Postgres.Database = database
 	}
+	if sslMode := os.Getenv("POSTGRES_SSLMODE"); sslMode != "" {
+		cfg.Postgres.SSLMode = sslMode
+	}
+	if listen := os.Getenv("PGMANAGER_LISTEN"); listen != "" {
+		cfg.API.Listen = listen
+	}
 	if apiPort := os.Getenv("PGMANAGER_API_PORT"); apiPort != "" {
 		if p, err := strconv.Atoi(apiPort); err == nil {
 			cfg.API.Port = p
@@ -137,20 +142,20 @@ func Load(path string) (*Config, error) {
 	if token := os.Getenv("PGMANAGER_API_TOKEN"); token != "" {
 		cfg.API.Token = token
 	}
-	if sslMode := os.Getenv("POSTGRES_SSLMODE"); sslMode != "" {
-		cfg.Postgres.SSLMode = sslMode
-	}
 	if requireToken := os.Getenv("PGMANAGER_REQUIRE_TOKEN"); requireToken != "" {
 		cfg.API.RequireToken = requireToken == "true" || requireToken == "1"
 	}
 	if origins := os.Getenv("PGMANAGER_ALLOWED_ORIGINS"); origins != "" {
 		cfg.API.AllowedOrigins = splitAndTrim(origins, ",")
 	}
-
-	return cfg, nil
+	if key := os.Getenv("PGMANAGER_ENCRYPTION_KEY"); key != "" {
+		cfg.Crypto.Key = key
+	}
+	if dir := os.Getenv("PGMANAGER_DATA_DIR"); dir != "" {
+		cfg.DataDir = dir
+	}
 }
 
-// splitAndTrim splits a string by separator and trims whitespace from each part
 func splitAndTrim(s, sep string) []string {
 	parts := strings.Split(s, sep)
 	result := make([]string, 0, len(parts))
@@ -162,7 +167,7 @@ func splitAndTrim(s, sep string) []string {
 	return result
 }
 
-// Default returns a default configuration without loading from file
+// Default returns a default server configuration.
 func Default() *Config {
 	return &Config{
 		Postgres: PostgresConfig{
@@ -173,16 +178,68 @@ func Default() *Config {
 			SSLMode:  "disable",
 		},
 		API: APIConfig{
+			Listen:       "127.0.0.1:8080",
 			Port:         8080,
 			RequireToken: true,
 		},
 		Cleanup: CleanupConfig{
 			DefaultTTL: 7 * 24 * time.Hour,
 		},
+		DataDir: "/var/lib/pgmanager",
 	}
 }
 
-// ConnectionString returns a PostgreSQL connection string
+// BindAddress returns the address `pgmanager serve` should listen on.
+// If both Listen and Port are set, Listen wins. If only Port is set,
+// returns "127.0.0.1:<port>" (safe default).
+func (c *APIConfig) BindAddress() string {
+	if c.Listen != "" {
+		return c.Listen
+	}
+	port := c.Port
+	if port == 0 {
+		port = 8080
+	}
+	return fmt.Sprintf("127.0.0.1:%d", port)
+}
+
+// EncryptionKey returns the configured key bytes. Order: env Key field
+// (already set from PGMANAGER_ENCRYPTION_KEY) -> KeyFile contents.
+// Returns nil with no error if no key is configured.
+func (c *CryptoConfig) EncryptionKey() ([]byte, error) {
+	if c.Key != "" {
+		return parseB64Key(c.Key)
+	}
+	if c.KeyFile != "" {
+		data, err := os.ReadFile(c.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("read key file: %w", err)
+		}
+		return parseB64Key(strings.TrimSpace(string(data)))
+	}
+	return nil, nil
+}
+
+func parseB64Key(s string) ([]byte, error) {
+	// Mirror of internal/crypto.ParseKey to avoid an import cycle.
+	for _, dec := range []*base64.Encoding{
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+	} {
+		key, err := dec.DecodeString(s)
+		if err == nil {
+			if len(key) != 32 {
+				return nil, fmt.Errorf("encryption key must be 32 bytes")
+			}
+			return key, nil
+		}
+	}
+	return nil, fmt.Errorf("encryption key must be base64-encoded")
+}
+
+// ConnectionString returns a PostgreSQL connection string.
 func (c *PostgresConfig) ConnectionString() string {
 	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		c.Host, c.Port, c.User, c.Password, c.Database, c.SSLMode)
