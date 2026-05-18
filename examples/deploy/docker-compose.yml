@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    # No `ports:` block on purpose — Postgres stays on the internal network.
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgmanager:
+    image: ghcr.io/subhanmahmood/pgmanager:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DATABASE: postgres
+      POSTGRES_SSLMODE: disable          # internal network only
+      PGMANAGER_LISTEN: 0.0.0.0:8080
+      PGMANAGER_REQUIRE_TOKEN: "true"
+      PGMANAGER_ENCRYPTION_KEY: ${PGMANAGER_ENCRYPTION_KEY:?run `pgmanager keygen` and set PGMANAGER_ENCRYPTION_KEY}
+      PGMANAGER_DATA_DIR: /var/lib/pgmanager
+      # Uncomment to pre-seed the admin token instead of letting it auto-generate:
+      # PGMANAGER_BOOTSTRAP_TOKEN: ${PGMANAGER_BOOTSTRAP_TOKEN}
+    volumes:
+      - pgmanager-data:/var/lib/pgmanager
+    networks: [internal]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [pgmanager]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PGMANAGER_API_DOMAIN: ${PGMANAGER_API_DOMAIN:?PGMANAGER_API_DOMAIN is required}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [internal]
+
+networks:
+  internal:
+
+volumes:
+  postgres-data:
+  pgmanager-data:
+  caddy-data:
+  caddy-config:

@@ -7,8 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"pgmanager/internal/meta"
-	"pgmanager/internal/project"
+
+	"pgmanager/internal/client"
 )
 
 var (
@@ -45,10 +45,10 @@ const (
 )
 
 type model struct {
-	mgr            *project.Manager
-	projects       []meta.Project
-	databases      []project.DatabaseInfo
-	selectedDB     *project.DatabaseInfo
+	c              client.Client
+	projects       []client.Project
+	databases      []client.Database
+	selectedDB     *client.Database
 	cursor         int
 	currentView    view
 	currentProject string
@@ -58,21 +58,19 @@ type model struct {
 	height         int
 }
 
-func initialModel(mgr *project.Manager) model {
-	return model{
-		mgr:         mgr,
-		currentView: viewProjects,
-	}
+func initialModel(c client.Client) model {
+	return model{c: c, currentView: viewProjects}
 }
 
-type projectsLoadedMsg []meta.Project
-type databasesLoadedMsg []project.DatabaseInfo
+type projectsLoadedMsg []client.Project
+type databasesLoadedMsg []client.Database
+type credentialsLoadedMsg client.Database
 type errMsg error
 type successMsg string
 
-func loadProjects(mgr *project.Manager) tea.Cmd {
+func loadProjects(c client.Client) tea.Cmd {
 	return func() tea.Msg {
-		projects, err := mgr.ListProjects(context.Background())
+		projects, err := c.ListProjects(context.Background())
 		if err != nil {
 			return errMsg(err)
 		}
@@ -80,9 +78,9 @@ func loadProjects(mgr *project.Manager) tea.Cmd {
 	}
 }
 
-func loadDatabases(mgr *project.Manager, projectName string) tea.Cmd {
+func loadDatabases(c client.Client, projectName string) tea.Cmd {
 	return func() tea.Msg {
-		databases, err := mgr.ListDatabases(context.Background(), projectName)
+		databases, err := c.ListDatabases(context.Background(), projectName)
 		if err != nil {
 			return errMsg(err)
 		}
@@ -90,9 +88,17 @@ func loadDatabases(mgr *project.Manager, projectName string) tea.Cmd {
 	}
 }
 
-func (m model) Init() tea.Cmd {
-	return loadProjects(m.mgr)
+func loadCredentials(c client.Client, projectName, env string, prNumber *int) tea.Cmd {
+	return func() tea.Msg {
+		info, err := c.GetDatabaseCredentials(context.Background(), projectName, env, prNumber)
+		if err != nil {
+			return errMsg(err)
+		}
+		return credentialsLoadedMsg(*info)
+	}
 }
+
+func (m model) Init() tea.Cmd { return loadProjects(m.c) }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -116,6 +122,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		return m, nil
 
+	case credentialsLoadedMsg:
+		d := client.Database(msg)
+		m.selectedDB = &d
+		m.err = nil
+		return m, nil
+
 	case errMsg:
 		m.err = msg
 		return m, nil
@@ -124,7 +136,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.message = string(msg)
 		return m, nil
 	}
-
 	return m, nil
 }
 
@@ -134,11 +145,10 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.currentView == viewProjects {
 			return m, tea.Quit
 		}
-		// Go back
 		m.currentView = viewProjects
 		m.currentProject = ""
 		m.cursor = 0
-		return m, loadProjects(m.mgr)
+		return m, loadProjects(m.c)
 
 	case "up", "k":
 		if m.cursor > 0 {
@@ -156,6 +166,12 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		return m.handleEnter()
 
+	case "p":
+		// Fetch credentials for the currently selected database.
+		if m.currentView == viewDatabaseInfo && m.selectedDB != nil {
+			return m, loadCredentials(m.c, m.selectedDB.Project, m.selectedDB.Env, m.selectedDB.PRNumber)
+		}
+
 	case "esc", "b":
 		if m.currentView == viewDatabaseInfo {
 			m.currentView = viewDatabases
@@ -166,21 +182,19 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.currentView = viewProjects
 			m.currentProject = ""
 			m.cursor = 0
-			return m, loadProjects(m.mgr)
+			return m, loadProjects(m.c)
 		}
 		return m, nil
 
 	case "r":
-		// Refresh
 		if m.currentView == viewProjects {
-			return m, loadProjects(m.mgr)
+			return m, loadProjects(m.c)
 		}
 		if m.currentView == viewDatabases {
-			return m, loadDatabases(m.mgr, m.currentProject)
+			return m, loadDatabases(m.c, m.currentProject)
 		}
 		return m, nil
 	}
-
 	return m, nil
 }
 
@@ -191,16 +205,15 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 			m.currentProject = m.projects[m.cursor].Name
 			m.currentView = viewDatabases
 			m.cursor = 0
-			return m, loadDatabases(m.mgr, m.currentProject)
+			return m, loadDatabases(m.c, m.currentProject)
 		}
-
 	case viewDatabases:
 		if len(m.databases) > 0 && m.cursor < len(m.databases) {
-			m.selectedDB = &m.databases[m.cursor]
+			d := m.databases[m.cursor]
+			m.selectedDB = &d
 			m.currentView = viewDatabaseInfo
 		}
 	}
-
 	return m, nil
 }
 
@@ -217,7 +230,6 @@ func (m model) getMaxItems() int {
 func (m model) View() string {
 	var s strings.Builder
 
-	// Title
 	title := "pgmanager"
 	if m.currentProject != "" {
 		title += " > " + m.currentProject
@@ -225,19 +237,15 @@ func (m model) View() string {
 	s.WriteString(titleStyle.Render(title))
 	s.WriteString("\n")
 
-	// Error message
 	if m.err != nil {
 		s.WriteString(errorStyle.Render("Error: " + m.err.Error()))
 		s.WriteString("\n\n")
 	}
-
-	// Success message
 	if m.message != "" {
 		s.WriteString(successStyle.Render(m.message))
 		s.WriteString("\n\n")
 	}
 
-	// Content based on view
 	switch m.currentView {
 	case viewProjects:
 		s.WriteString(m.renderProjectsView())
@@ -247,21 +255,17 @@ func (m model) View() string {
 		s.WriteString(m.renderDatabaseInfoView())
 	}
 
-	// Help
 	s.WriteString("\n")
 	s.WriteString(m.renderHelp())
-
 	return s.String()
 }
 
 func (m model) renderProjectsView() string {
 	var s strings.Builder
-
 	if len(m.projects) == 0 {
 		s.WriteString("No projects found. Create one with: pgmanager project create <name>\n")
 		return s.String()
 	}
-
 	s.WriteString("Projects:\n\n")
 	for i, p := range m.projects {
 		cursor := "  "
@@ -274,19 +278,16 @@ func (m model) renderProjectsView() string {
 		s.WriteString(style.Render(line))
 		s.WriteString("\n")
 	}
-
 	return s.String()
 }
 
 func (m model) renderDatabasesView() string {
 	var s strings.Builder
-
 	if len(m.databases) == 0 {
 		s.WriteString("No databases found for this project.\n")
 		s.WriteString("Create one with: pgmanager db create " + m.currentProject + " <env>\n")
 		return s.String()
 	}
-
 	s.WriteString("Databases:\n\n")
 	for i, db := range m.databases {
 		cursor := "  "
@@ -303,7 +304,6 @@ func (m model) renderDatabasesView() string {
 		s.WriteString(style.Render(line))
 		s.WriteString("\n")
 	}
-
 	return s.String()
 }
 
@@ -311,24 +311,27 @@ func (m model) renderDatabaseInfoView() string {
 	if m.selectedDB == nil {
 		return "No database selected\n"
 	}
-
 	var s strings.Builder
 	db := m.selectedDB
 
 	s.WriteString("Database Information:\n\n")
 	s.WriteString(fmt.Sprintf("  Database: %s\n", db.DatabaseName))
 	s.WriteString(fmt.Sprintf("  User:     %s\n", db.UserName))
-	s.WriteString(fmt.Sprintf("  Password: %s\n", db.Password))
+	if db.Password != "" {
+		s.WriteString(fmt.Sprintf("  Password: %s\n", db.Password))
+	} else {
+		s.WriteString("  Password: <hidden — press 'p' to reveal>\n")
+	}
 	s.WriteString(fmt.Sprintf("  Host:     %s\n", db.Host))
 	s.WriteString(fmt.Sprintf("  Port:     %d\n", db.Port))
 	s.WriteString(fmt.Sprintf("  Created:  %s\n", db.CreatedAt.Format("2006-01-02 15:04:05")))
 	if db.ExpiresAt != nil {
 		s.WriteString(fmt.Sprintf("  Expires:  %s\n", db.ExpiresAt.Format("2006-01-02 15:04:05")))
 	}
-	s.WriteString("\n")
-	s.WriteString("Connection String:\n")
-	s.WriteString(fmt.Sprintf("  %s\n", db.ConnString))
-
+	if db.ConnString != "" {
+		s.WriteString("\nConnection String:\n")
+		s.WriteString(fmt.Sprintf("  %s\n", db.ConnString))
+	}
 	return s.String()
 }
 
@@ -340,14 +343,14 @@ func (m model) renderHelp() string {
 	case viewDatabases:
 		help = "↑/k up • ↓/j down • enter view • b/esc back • r refresh • q quit"
 	case viewDatabaseInfo:
-		help = "b/esc back • q quit"
+		help = "p reveal password • b/esc back • q quit"
 	}
 	return helpStyle.Render(help)
 }
 
-// Run starts the TUI application
-func Run(mgr *project.Manager) error {
-	p := tea.NewProgram(initialModel(mgr), tea.WithAltScreen())
+// Run starts the TUI application.
+func Run(c client.Client) error {
+	p := tea.NewProgram(initialModel(c), tea.WithAltScreen())
 	_, err := p.Run()
 	return err
 }
