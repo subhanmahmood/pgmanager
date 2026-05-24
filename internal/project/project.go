@@ -16,6 +16,10 @@ var (
 	// validNameRegex matches valid project names (lowercase alphanumeric and underscores)
 	validNameRegex = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
+	// validExtensionNameRegex matches Postgres extension names. Allows
+	// hyphens because canonical extensions like "uuid-ossp" require them.
+	validExtensionNameRegex = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+
 	// reservedNames are names that cannot be used as project names
 	reservedNames = map[string]bool{
 		"postgres":  true,
@@ -91,6 +95,22 @@ func ValidateEnv(env string) error {
 	return nil
 }
 
+// ValidateExtensionName validates a Postgres extension name. The actual SQL is
+// still emitted through pgx.Identifier{}.Sanitize() for defense in depth, but
+// rejecting bad input here gives a clearer error.
+func ValidateExtensionName(name string) error {
+	if name == "" {
+		return fmt.Errorf("extension name must not be empty")
+	}
+	if len(name) > 63 {
+		return fmt.Errorf("extension name %q too long (max 63 chars)", name)
+	}
+	if !validExtensionNameRegex.MatchString(name) {
+		return fmt.Errorf("invalid extension name %q (allowed: letters, digits, underscore, hyphen; must start with a letter)", name)
+	}
+	return nil
+}
+
 // DatabaseName generates the database name for a project and environment
 func DatabaseName(project, env string, prNumber *int) string {
 	if env == "pr" && prNumber != nil {
@@ -151,14 +171,22 @@ func (m *Manager) DeleteProject(ctx context.Context, name string) error {
 	return nil
 }
 
-// CreateDatabase creates a new database for a project
-func (m *Manager) CreateDatabase(ctx context.Context, projectName, env string, prNumber *int) (*DatabaseInfo, error) {
+// CreateDatabase creates a new database for a project. If extensions is
+// non-empty each name is installed into the new database (extensions
+// usually require superuser, so this runs as the admin connection).
+func (m *Manager) CreateDatabase(ctx context.Context, projectName, env string, prNumber *int, extensions []string) (*DatabaseInfo, error) {
 	if err := ValidateEnv(env); err != nil {
 		return nil, err
 	}
 
 	if env == "pr" && prNumber == nil {
 		return nil, fmt.Errorf("PR number is required for PR databases")
+	}
+
+	for _, ext := range extensions {
+		if err := ValidateExtensionName(ext); err != nil {
+			return nil, err
+		}
 	}
 
 	// Get project
@@ -194,6 +222,13 @@ func (m *Manager) CreateDatabase(ctx context.Context, projectName, env string, p
 	// Create database in PostgreSQL
 	if err := m.pg.CreateDatabase(ctx, dbName, userName, password); err != nil {
 		return nil, fmt.Errorf("failed to create database: %w", err)
+	}
+
+	// Install requested extensions. If any fails, roll back the database so
+	// callers don't see a half-provisioned DB land in the metadata store.
+	if err := m.pg.EnableExtensions(ctx, dbName, extensions); err != nil {
+		_ = m.pg.DropDatabase(ctx, dbName, userName)
+		return nil, err
 	}
 
 	// Store metadata

@@ -55,8 +55,9 @@ type Client interface {
 	ListProjects(ctx context.Context) ([]Project, error)
 	DeleteProject(ctx context.Context, name string) error
 
-	// Databases.
-	CreateDatabase(ctx context.Context, project, env string, prNumber *int) (*Database, error)
+	// Databases. extensions, if non-empty, lists Postgres extensions to
+	// install in the new database (e.g., []string{"vector"}).
+	CreateDatabase(ctx context.Context, project, env string, prNumber *int, extensions []string) (*Database, error)
 	GetDatabase(ctx context.Context, project, env string, prNumber *int) (*Database, error)
 	GetDatabaseCredentials(ctx context.Context, project, env string, prNumber *int) (*Database, error)
 	ListDatabases(ctx context.Context, project string) ([]Database, error)

@@ -203,32 +203,41 @@ func newProjectCmd() *cobra.Command {
 
 func newDBCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "db", Short: "Manage databases"}
-	cmd.AddCommand(
-		&cobra.Command{
-			Use:   "create <project> <env> [pr-number]",
-			Short: "Create a database",
-			Long:  "Create a database. env: prod, dev, staging, or pr (PR requires the PR number).",
-			Args:  cobra.RangeArgs(2, 3),
-			RunE: func(cmd *cobra.Command, args []string) error {
-				ctx := cmd.Context()
-				project, env, prNumber, err := parseDBArgs(args)
-				if err != nil {
-					return err
-				}
-				c, _, err := getClient(ctx)
-				if err != nil {
-					return err
-				}
-				defer c.Close()
-				info, err := c.CreateDatabase(ctx, project, env, prNumber)
-				if err != nil {
-					return err
-				}
-				return emit(info, func() {
-					printCredentials(info)
-				})
-			},
+
+	var extensions []string
+	createCmd := &cobra.Command{
+		Use:   "create <project> <env> [pr-number]",
+		Short: "Create a database",
+		Long: "Create a database. env: prod, dev, staging, or pr (PR requires the PR number).\n\n" +
+			"Repeat --extension/-x to install Postgres extensions in the new database\n" +
+			"(e.g. --extension vector -x pg_trgm). Extensions usually require superuser,\n" +
+			"so this runs with the server's admin credentials.",
+		Args: cobra.RangeArgs(2, 3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			project, env, prNumber, err := parseDBArgs(args)
+			if err != nil {
+				return err
+			}
+			c, _, err := getClient(ctx)
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			info, err := c.CreateDatabase(ctx, project, env, prNumber, extensions)
+			if err != nil {
+				return err
+			}
+			return emit(info, func() {
+				printCredentials(info)
+			})
 		},
+	}
+	createCmd.Flags().StringSliceVarP(&extensions, "extension", "x", nil,
+		"Postgres extension to install (repeatable; e.g. -x vector -x pg_trgm)")
+
+	cmd.AddCommand(
+		createCmd,
 		&cobra.Command{
 			Use:   "delete <project> <env> [pr-number]",
 			Short: "Delete a database",

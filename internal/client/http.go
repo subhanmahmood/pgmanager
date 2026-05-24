@@ -105,10 +105,13 @@ func (c *HTTPClient) DeleteProject(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, "/projects/"+url.PathEscape(name), nil, nil)
 }
 
-func (c *HTTPClient) CreateDatabase(ctx context.Context, projectName, env string, prNumber *int) (*Database, error) {
+func (c *HTTPClient) CreateDatabase(ctx context.Context, projectName, env string, prNumber *int, extensions []string) (*Database, error) {
 	body := map[string]interface{}{"env": env}
 	if prNumber != nil {
 		body["pr_number"] = *prNumber
+	}
+	if len(extensions) > 0 {
+		body["extensions"] = extensions
 	}
 	var out Database
 	if err := c.do(ctx, http.MethodPost, "/projects/"+url.PathEscape(projectName)+"/databases", body, &out); err != nil {

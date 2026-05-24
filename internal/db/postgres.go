@@ -70,6 +70,35 @@ func (c *PostgresClient) CreateDatabase(ctx context.Context, dbName, userName, p
 	return nil
 }
 
+// EnableExtensions installs each extension into the given database. Connects
+// as the configured admin user (extensions usually require superuser). Caller
+// is responsible for any rollback if this fails — typical pattern is to drop
+// the database it just created.
+func (c *PostgresClient) EnableExtensions(ctx context.Context, dbName string, extensions []string) error {
+	if len(extensions) == 0 {
+		return nil
+	}
+	sslMode := c.cfg.SSLMode
+	if sslMode == "" {
+		sslMode = "require"
+	}
+	connStr := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		c.cfg.Host, c.cfg.Port, c.cfg.User, c.cfg.Password, dbName, sslMode)
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		return fmt.Errorf("failed to connect to %s: %w", dbName, err)
+	}
+	defer conn.Close(ctx)
+
+	for _, ext := range extensions {
+		sql := fmt.Sprintf("CREATE EXTENSION IF NOT EXISTS %s", pgx.Identifier{ext}.Sanitize())
+		if _, err := conn.Exec(ctx, sql); err != nil {
+			return fmt.Errorf("failed to create extension %q: %w", ext, err)
+		}
+	}
+	return nil
+}
+
 // DropDatabase drops a database and its associated user
 func (c *PostgresClient) DropDatabase(ctx context.Context, dbName, userName string) error {
 	conn, err := c.connect(ctx)
