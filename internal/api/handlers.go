@@ -63,8 +63,9 @@ type CreateProjectRequest struct {
 }
 
 type CreateDatabaseRequest struct {
-	Env      string `json:"env"`
-	PRNumber *int   `json:"pr_number,omitempty"`
+	Env        string   `json:"env"`
+	PRNumber   *int     `json:"pr_number,omitempty"`
+	Extensions []string `json:"extensions,omitempty"`
 }
 
 type CleanupRequest struct {
@@ -240,7 +241,7 @@ func (s *Server) createDatabase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := s.mgr.CreateDatabase(r.Context(), projectName, req.Env, req.PRNumber)
+	info, err := s.mgr.CreateDatabase(r.Context(), projectName, req.Env, req.PRNumber, req.Extensions)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

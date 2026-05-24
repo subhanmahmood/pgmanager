@@ -62,8 +62,8 @@ func (c *LocalClient) DeleteProject(ctx context.Context, name string) error {
 	return c.mgr.DeleteProject(ctx, name)
 }
 
-func (c *LocalClient) CreateDatabase(ctx context.Context, projectName, env string, prNumber *int) (*Database, error) {
-	info, err := c.mgr.CreateDatabase(ctx, projectName, env, prNumber)
+func (c *LocalClient) CreateDatabase(ctx context.Context, projectName, env string, prNumber *int, extensions []string) (*Database, error) {
+	info, err := c.mgr.CreateDatabase(ctx, projectName, env, prNumber, extensions)
 	if err != nil {
 		return nil, err
 	}

@@ -38,6 +38,36 @@ func TestValidateName(t *testing.T) {
 	}
 }
 
+func TestValidateExtensionName(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{"vector", "vector", false},
+		{"pg_trgm", "pg_trgm", false},
+		{"uuid-ossp (canonical hyphen)", "uuid-ossp", false},
+		{"camelCase allowed", "CitusDB", false},
+		{"empty", "", true},
+		{"starts with digit", "1ext", true},
+		{"starts with underscore", "_ext", true},
+		{"starts with hyphen", "-ext", true},
+		{"contains space", "bad ext", true},
+		{"contains semicolon (injection)", "vector;DROP TABLE x", true},
+		{"contains quote", "ext'or'1", true},
+		{"too long (64 chars)", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateExtensionName(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateExtensionName(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateEnv(t *testing.T) {
 	tests := []struct {
 		name    string
