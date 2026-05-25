@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"pgmanager/internal/auth"
+	"pgmanager/internal/db"
 )
 
 // MaxPRNumber is the maximum allowed PR number.
@@ -189,22 +191,23 @@ func (s *Server) listDatabases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	host, port := s.publicHostPort(r)
 	response := make([]DatabaseInfoResponse, len(databases))
-	for i, db := range databases {
+	for i, info := range databases {
 		var expiresAt *string
-		if db.ExpiresAt != nil {
-			t := db.ExpiresAt.Format(time.RFC3339)
+		if info.ExpiresAt != nil {
+			t := info.ExpiresAt.Format(time.RFC3339)
 			expiresAt = &t
 		}
 		response[i] = DatabaseInfoResponse{
-			Project:      db.Project,
-			Env:          db.Env,
-			PRNumber:     db.PRNumber,
-			DatabaseName: db.DatabaseName,
-			UserName:     db.UserName,
-			Host:         db.Host,
-			Port:         db.Port,
-			CreatedAt:    db.CreatedAt.Format(time.RFC3339),
+			Project:      info.Project,
+			Env:          info.Env,
+			PRNumber:     info.PRNumber,
+			DatabaseName: info.DatabaseName,
+			UserName:     info.UserName,
+			Host:         host,
+			Port:         port,
+			CreatedAt:    info.CreatedAt.Format(time.RFC3339),
 			ExpiresAt:    expiresAt,
 		}
 	}
@@ -252,6 +255,7 @@ func (s *Server) createDatabase(w http.ResponseWriter, r *http.Request) {
 		t := info.ExpiresAt.Format(time.RFC3339)
 		expiresAt = &t
 	}
+	host, port, connStr := s.withPublicHost(r, info.DatabaseName, info.UserName, info.Password)
 	writeJSON(w, http.StatusCreated, DatabaseResponse{
 		Project:      info.Project,
 		Env:          info.Env,
@@ -259,9 +263,9 @@ func (s *Server) createDatabase(w http.ResponseWriter, r *http.Request) {
 		DatabaseName: info.DatabaseName,
 		UserName:     info.UserName,
 		Password:     info.Password,
-		Host:         info.Host,
-		Port:         info.Port,
-		ConnString:   info.ConnString,
+		Host:         host,
+		Port:         port,
+		ConnString:   connStr,
 		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
 		ExpiresAt:    expiresAt,
 	})
@@ -294,14 +298,15 @@ func (s *Server) getDatabase(w http.ResponseWriter, r *http.Request) {
 		t := info.ExpiresAt.Format(time.RFC3339)
 		expiresAt = &t
 	}
+	host, port := s.publicHostPort(r)
 	writeJSON(w, http.StatusOK, DatabaseInfoResponse{
 		Project:      info.Project,
 		Env:          info.Env,
 		PRNumber:     info.PRNumber,
 		DatabaseName: info.DatabaseName,
 		UserName:     info.UserName,
-		Host:         info.Host,
-		Port:         info.Port,
+		Host:         host,
+		Port:         port,
 		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
 		ExpiresAt:    expiresAt,
 	})
@@ -336,6 +341,7 @@ func (s *Server) getDatabaseCredentials(w http.ResponseWriter, r *http.Request) 
 		t := info.ExpiresAt.Format(time.RFC3339)
 		expiresAt = &t
 	}
+	host, port, connStr := s.withPublicHost(r, info.DatabaseName, info.UserName, info.Password)
 	writeJSON(w, http.StatusOK, DatabaseResponse{
 		Project:      info.Project,
 		Env:          info.Env,
@@ -343,9 +349,9 @@ func (s *Server) getDatabaseCredentials(w http.ResponseWriter, r *http.Request) 
 		DatabaseName: info.DatabaseName,
 		UserName:     info.UserName,
 		Password:     info.Password,
-		Host:         info.Host,
-		Port:         info.Port,
-		ConnString:   info.ConnString,
+		Host:         host,
+		Port:         port,
+		ConnString:   connStr,
 		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
 		ExpiresAt:    expiresAt,
 	})
@@ -401,6 +407,49 @@ func (s *Server) cleanup(w http.ResponseWriter, r *http.Request) {
 		Deleted: deleted,
 		Count:   len(deleted),
 	})
+}
+
+// publicHostPort returns the host/port to advertise to clients in connection
+// strings and DB-info responses. The server's own connection to Postgres
+// always uses cfg.Postgres.Host / Port — this is purely about the value
+// clients see.
+//
+// Resolution order:
+//  1. cfg.Postgres.PublicHost if set (explicit operator config wins)
+//  2. r.Host (port stripped) if available — covers the common case where
+//     Postgres and the API live on the same host and the client already
+//     reached that host. Skipped if r.Host is empty (local mode).
+//  3. cfg.Postgres.Host (current behaviour, last resort).
+//
+// Port mirrors: PublicPort if set, otherwise cfg.Postgres.Port.
+func (s *Server) publicHostPort(r *http.Request) (string, int) {
+	host := s.cfg.Postgres.PublicHost
+	if host == "" && r != nil && r.Host != "" {
+		if h, _, err := net.SplitHostPort(r.Host); err == nil {
+			host = h
+		} else {
+			// r.Host had no port; use it as-is.
+			host = r.Host
+		}
+	}
+	if host == "" {
+		host = s.cfg.Postgres.Host
+	}
+
+	port := s.cfg.Postgres.PublicPort
+	if port == 0 {
+		port = s.cfg.Postgres.Port
+	}
+	return host, port
+}
+
+// withPublicHost rewrites the Host / Port / ConnString fields on a database
+// info pulled from the manager so they reflect the client-reachable endpoint
+// rather than the server-internal one. Other fields (password, names) are
+// untouched.
+func (s *Server) withPublicHost(r *http.Request, dbName, userName, password string) (string, int, string) {
+	host, port := s.publicHostPort(r)
+	return host, port, db.ConnectionString(host, port, dbName, userName, password, s.cfg.Postgres.SSLMode)
 }
 
 // parseEnvParam parses a URL path env segment which may be "pr_42" form.

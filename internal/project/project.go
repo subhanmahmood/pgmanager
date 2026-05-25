@@ -239,6 +239,8 @@ func (m *Manager) CreateDatabase(ctx context.Context, projectName, env string, p
 		return nil, fmt.Errorf("failed to store database metadata: %w", err)
 	}
 
+	host := m.cfg.Postgres.EffectiveHost()
+	port := m.cfg.Postgres.EffectivePort()
 	return &DatabaseInfo{
 		Project:      projectName,
 		Env:          env,
@@ -246,9 +248,9 @@ func (m *Manager) CreateDatabase(ctx context.Context, projectName, env string, p
 		DatabaseName: dbName,
 		UserName:     userName,
 		Password:     password,
-		Host:         m.cfg.Postgres.Host,
-		Port:         m.cfg.Postgres.Port,
-		ConnString:   db.ConnectionString(m.cfg.Postgres.Host, m.cfg.Postgres.Port, dbName, userName, password, m.cfg.Postgres.SSLMode),
+		Host:         host,
+		Port:         port,
+		ConnString:   db.ConnectionString(host, port, dbName, userName, password, m.cfg.Postgres.SSLMode),
 		CreatedAt:    dbRecord.CreatedAt,
 		ExpiresAt:    expiresAt,
 	}, nil
@@ -282,6 +284,8 @@ func (m *Manager) GetDatabase(ctx context.Context, projectName, env string, prNu
 		return nil, fmt.Errorf("database not found for %s/%s", projectName, envStr)
 	}
 
+	host := m.cfg.Postgres.EffectiveHost()
+	port := m.cfg.Postgres.EffectivePort()
 	return &DatabaseInfo{
 		Project:      projectName,
 		Env:          env,
@@ -289,9 +293,9 @@ func (m *Manager) GetDatabase(ctx context.Context, projectName, env string, prNu
 		DatabaseName: dbRecord.Name,
 		UserName:     dbRecord.UserName,
 		Password:     dbRecord.Password,
-		Host:         m.cfg.Postgres.Host,
-		Port:         m.cfg.Postgres.Port,
-		ConnString:   db.ConnectionString(m.cfg.Postgres.Host, m.cfg.Postgres.Port, dbRecord.Name, dbRecord.UserName, dbRecord.Password, m.cfg.Postgres.SSLMode),
+		Host:         host,
+		Port:         port,
+		ConnString:   db.ConnectionString(host, port, dbRecord.Name, dbRecord.UserName, dbRecord.Password, m.cfg.Postgres.SSLMode),
 		CreatedAt:    dbRecord.CreatedAt,
 		ExpiresAt:    dbRecord.ExpiresAt,
 	}, nil
@@ -322,6 +326,8 @@ func (m *Manager) ListDatabases(ctx context.Context, projectName string) ([]Data
 	// Convert to DatabaseInfo and look up project names
 	result := make([]DatabaseInfo, 0, len(databases))
 	projectCache := make(map[int64]string)
+	host := m.cfg.Postgres.EffectiveHost()
+	port := m.cfg.Postgres.EffectivePort()
 
 	for _, dbItem := range databases {
 		// Get project name
@@ -341,9 +347,9 @@ func (m *Manager) ListDatabases(ctx context.Context, projectName string) ([]Data
 			DatabaseName: dbItem.Name,
 			UserName:     dbItem.UserName,
 			Password:     dbItem.Password,
-			Host:         m.cfg.Postgres.Host,
-			Port:         m.cfg.Postgres.Port,
-			ConnString:   db.ConnectionString(m.cfg.Postgres.Host, m.cfg.Postgres.Port, dbItem.Name, dbItem.UserName, dbItem.Password, m.cfg.Postgres.SSLMode),
+			Host:         host,
+			Port:         port,
+			ConnString:   db.ConnectionString(host, port, dbItem.Name, dbItem.UserName, dbItem.Password, m.cfg.Postgres.SSLMode),
 			CreatedAt:    dbItem.CreatedAt,
 			ExpiresAt:    dbItem.ExpiresAt,
 		})
