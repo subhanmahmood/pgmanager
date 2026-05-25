@@ -71,10 +71,17 @@ pgmanager project delete <name>     # Delete project and all its databases
 
 ```bash
 pgmanager db create <project> <env> [pr-number]  # Create database
+pgmanager db create myapp dev -x vector -x pg_trgm  # ...with extensions installed
 pgmanager db delete <project> <env> [pr-number]  # Delete database
 pgmanager db list [project]                      # List databases
 pgmanager db info <project> <env> [pr-number]    # Get connection info
 ```
+
+Pass `--extension`/`-x` one or more times to install Postgres extensions
+into the new database immediately after creation. Names must match
+`^[a-zA-Z][a-zA-Z0-9_-]*$` (hyphen kept so `uuid-ossp` works). If any
+extension fails to install the new database is dropped, so you never
+end up with a half-provisioned DB in the metadata store.
 
 ### Server & UI
 
