@@ -99,24 +99,46 @@ docker compose logs -f pgmanager | grep audit
 
 ## Updating
 
+The Server image is published to `ghcr.io/subhanmahmood/pgmanager` on every
+release. `docker-compose.yml` pins to the minor float (`:v0.1`) so patch
+releases come down on `pull` but a breaking major bump won't surprise you.
+
+The upgrade is two commands:
+
 ```bash
-git pull                 # only if compose / Caddyfile changed
-./upgrade.sh
+docker compose pull pgmanager
+docker compose up -d pgmanager
 ```
 
-`upgrade.sh` pulls the Server image at the tag pinned in `docker-compose.yml`
-and recreates only the `pgmanager` container — Postgres and its data volume
-are untouched, application databases keep running, and the metadata
-migration is idempotent. To bump to a new minor or major image tag, edit
-`docker-compose.yml` first, then run the script.
+Postgres and its data volume are untouched, application databases keep
+running, and the metadata migration is idempotent.
 
-> The script depends on the Server image being published to
-> `ghcr.io/subhanmahmood/pgmanager` (tracked in [#17][issue-17]). Until that
-> lands the pull step will fail with `image not found` — the existing
-> `image: ghcr.io/...:latest` line in `docker-compose.yml` has the same
-> dependency, so this script doesn't introduce it.
+A wrapper is shipped for convenience:
 
-[issue-17]: https://github.com/subhanmahmood/pgmanager/issues/17
+```bash
+git pull                 # only if compose / Caddyfile changed
+./upgrade.sh             # pull current pin and recreate
+./upgrade.sh --tag v0.2  # rewrite the pin in compose first, then pull/recreate
+```
+
+### Image tags
+
+Every release publishes four tags to `ghcr.io/subhanmahmood/pgmanager`:
+
+- `vX.Y.Z` — exact, immutable
+- `vX.Y` — minor float (recommended for unattended deploys)
+- `vX` — major float
+- `latest` — most recent stable release
+
+### Making the package public (one-time)
+
+The first time the release workflow pushes to ghcr, the package is created
+**private** by default. From the repo admin account:
+
+1. Open `https://github.com/users/subhanmahmood/packages/container/pgmanager/settings`
+2. Scroll to "Danger Zone" → **Change visibility** → Public
+
+After that, `docker compose pull` works on any machine without authenticating.
 
 ## Connection strings — the public Postgres endpoint
 

@@ -1,7 +1,8 @@
 # Build stage
-FROM golang:1.23-alpine AS builder
-
-RUN apk add --no-cache gcc musl-dev
+# BUILDPLATFORM/TARGETOS/TARGETARCH are provided by buildx for multi-arch builds;
+# pinning the builder to BUILDPLATFORM keeps the toolchain native and uses
+# Go's own cross-compilation (CGO_ENABLED=0, all deps are pure Go).
+FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
@@ -11,8 +12,10 @@ RUN go mod download
 COPY . .
 
 ARG VERSION=dev
-RUN CGO_ENABLED=1 GOOS=linux go build \
-    -a -ldflags "-linkmode external -extldflags '-static' -X main.Version=${VERSION}" \
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+    go build -ldflags "-s -w -X main.Version=${VERSION}" \
     -o pgmanager ./cmd/pgmanager
 
 # Final stage
