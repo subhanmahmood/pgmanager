@@ -110,25 +110,18 @@ The metadata migration is idempotent. Existing application databases and Postgre
 ## Connection strings — the public Postgres endpoint
 
 `db create` / `db info` responses include a `connection_string` and a `host`.
-By default these are derived from the inbound HTTPS request's Host header, so
-in the canonical deploy above clients receive `pgm.example.com` — exactly the
-hostname they used to reach the API. No extra config required.
+The bundled `docker-compose.yml` defaults `POSTGRES_PUBLIC_HOST` to
+`PGMANAGER_API_DOMAIN`, so clients receive the same hostname they used to
+reach the API. No extra config required.
 
 If you expose Postgres on a *different* hostname than the API (e.g. a separate
-DNS record, a load balancer, or a Tailscale-only endpoint), set it explicitly:
+DNS record, a load balancer, or a Tailscale-only endpoint), set
+`POSTGRES_PUBLIC_HOST` (and optionally `POSTGRES_PUBLIC_PORT`) in `.env`:
 
-```yaml
-# pgmanager.yaml
-postgres:
-  host: postgres            # internal compose service — how pgmanager connects
-  port: 5432
-  public_host: db.example.com   # what clients see in connection strings
-  public_port: 5432
+```bash
+POSTGRES_PUBLIC_HOST=db.example.com
+POSTGRES_PUBLIC_PORT=5432
 ```
 
-Env equivalents (drop these into the `pgmanager` service in `docker-compose.yml`):
-
-```yaml
-POSTGRES_PUBLIC_HOST: db.example.com
-POSTGRES_PUBLIC_PORT: 5432
-```
+Both vars are also read from `pgmanager.yaml` as `postgres.public_host` /
+`postgres.public_port` if you're not using compose.
