@@ -100,12 +100,23 @@ docker compose logs -f pgmanager | grep audit
 ## Updating
 
 ```bash
-git pull
-docker compose pull
-docker compose up -d
+git pull                 # only if compose / Caddyfile changed
+./upgrade.sh
 ```
 
-The metadata migration is idempotent. Existing application databases and Postgres users are untouched.
+`upgrade.sh` pulls the Server image at the tag pinned in `docker-compose.yml`
+and recreates only the `pgmanager` container — Postgres and its data volume
+are untouched, application databases keep running, and the metadata
+migration is idempotent. To bump to a new minor or major image tag, edit
+`docker-compose.yml` first, then run the script.
+
+> The script depends on the Server image being published to
+> `ghcr.io/subhanmahmood/pgmanager` (tracked in [#17][issue-17]). Until that
+> lands the pull step will fail with `image not found` — the existing
+> `image: ghcr.io/...:latest` line in `docker-compose.yml` has the same
+> dependency, so this script doesn't introduce it.
+
+[issue-17]: https://github.com/subhanmahmood/pgmanager/issues/17
 
 ## Connection strings — the public Postgres endpoint
 
