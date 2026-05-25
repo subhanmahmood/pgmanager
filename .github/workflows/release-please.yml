@@ -12,8 +12,107 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - id: release
+        uses: googleapis/release-please-action@v4
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  build-linux:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Install cross-compiler for arm64
+        if: matrix.goarch == 'arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          if [ "$GOARCH" = "arm64" ]; then
+            export CC=aarch64-linux-gnu-gcc
+          fi
+          go build -ldflags="-s -w -X main.Version=${TAG}" \
+            -o pgmanager-linux-${{ matrix.goarch }} ./cmd/pgmanager
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgmanager-linux-${{ matrix.goarch }}
+          path: pgmanager-linux-${{ matrix.goarch }}
+
+  build-macos:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Build
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          go build -ldflags="-s -w -X main.Version=${TAG}" \
+            -o pgmanager-darwin-${{ matrix.goarch }} ./cmd/pgmanager
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgmanager-darwin-${{ matrix.goarch }}
+          path: pgmanager-darwin-${{ matrix.goarch }}
+
+  upload-release-assets:
+    needs: [release-please, build-linux, build-macos]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Attach binaries to release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          files: dist/pgmanager-*
