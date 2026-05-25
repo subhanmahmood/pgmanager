@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 	cryptoutil "pgmanager/internal/crypto"
 	"pgmanager/internal/meta"
 	"pgmanager/internal/project"
+	"pgmanager/internal/selfupdate"
 	"pgmanager/internal/tui"
 )
 
@@ -52,7 +54,7 @@ func newRootCmd() *cobra.Command {
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// `serve`, `version`, `init`, `keygen` do not use the client profile.
 			switch cmd.Name() {
-			case "serve", "version", "init", "keygen", "help":
+			case "serve", "version", "init", "keygen", "update", "help":
 				return nil
 			}
 			cfg, path, err := config.LoadClient()
@@ -83,6 +85,7 @@ func newRootCmd() *cobra.Command {
 		newAuthCmd(),
 		newDoctorCmd(),
 		newKeygenCmd(),
+		newUpdateCmd(),
 	)
 	return root
 }
@@ -822,6 +825,61 @@ func newKeygenCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// --- self-update ------------------------------------------------------------
+
+func newUpdateCmd() *cobra.Command {
+	var (
+		check      bool
+		force      bool
+		pinVersion string
+		prerelease bool
+		dryRun     bool
+	)
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Update pgmanager to the latest release",
+		Long: "Download the latest pgmanager release for this OS/arch from GitHub,\n" +
+			"verify its SHA-256 against the release checksums, and atomically replace\n" +
+			"the running binary.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			opts := selfupdate.Options{
+				CurrentVersion: Version,
+				Check:          check,
+				Force:          force,
+				Version:        pinVersion,
+				Prerelease:     prerelease,
+				DryRun:         dryRun,
+				CacheDir:       updateCacheDir(),
+				Out:            cmd.OutOrStdout(),
+			}
+			res, err := selfupdate.Run(cmd.Context(), opts)
+			if err != nil {
+				return err
+			}
+			if check && res.UpdateAvailable {
+				os.Exit(1)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&check, "check", false, "report whether an update is available (exit 1 if so); don't write anything")
+	cmd.Flags().BoolVar(&force, "force", false, "update even if already current, and override dev/package-manager safety checks")
+	cmd.Flags().StringVar(&pinVersion, "version", "", "install a specific release tag (e.g. v0.2.0)")
+	cmd.Flags().BoolVar(&prerelease, "prerelease", false, "include prereleases when resolving the latest version")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would happen without downloading or writing")
+	return cmd
+}
+
+// updateCacheDir returns the directory used for the self-update ETag cache,
+// or "" (caching disabled) if it can't be determined.
+func updateCacheDir() string {
+	p, err := config.ClientConfigPath()
+	if err != nil {
+		return ""
+	}
+	return filepath.Dir(p)
 }
 
 // --- helpers ----------------------------------------------------------------

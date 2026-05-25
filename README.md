@@ -25,6 +25,20 @@ go build -o pgmanager ./cmd/pgmanager
 docker build -t pgmanager:latest .
 ```
 
+### Updating
+
+Once installed, pgmanager can update itself in place from GitHub Releases:
+
+```bash
+pgmanager update              # update to the latest stable release
+pgmanager update --check      # report if an update is available (exit 1 if so)
+pgmanager update --version v0.2.0   # pin to a specific tag
+```
+
+The downloaded binary is verified against the release `checksums.txt` before
+the running binary is atomically replaced. See `pgmanager update --help` for
+`--force`, `--prerelease`, and `--dry-run`.
+
 ## Quick Start
 
 1. Create a configuration file:
@@ -89,6 +103,7 @@ end up with a half-provisioned DB in the metadata store.
 pgmanager serve [-p 8080]    # Start REST API server
 pgmanager tui                # Launch Terminal UI
 pgmanager cleanup            # Clean up expired PR databases
+pgmanager update             # Self-update to the latest release
 ```
 
 ## REST API
