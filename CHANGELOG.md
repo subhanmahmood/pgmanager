@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.6](https://github.com/subhanmahmood/pgmanager/compare/v0.1.5...v0.1.6) (2026-05-25)
+
+
+### Features
+
+* **deploy:** add upgrade.sh wrapper for the canonical Deployment ([#18](https://github.com/subhanmahmood/pgmanager/issues/18)) ([20c11a7](https://github.com/subhanmahmood/pgmanager/commit/20c11a7b1ce079172be8572f1c5881daf406a1e6))
+* **release:** publish Server image to ghcr.io and pin canonical Deployment ([#20](https://github.com/subhanmahmood/pgmanager/issues/20)) ([304887c](https://github.com/subhanmahmood/pgmanager/commit/304887c3cd3bce8db81de14a8d656ce54378bace))
+
 ## [0.1.5](https://github.com/subhanmahmood/pgmanager/compare/v0.1.4...v0.1.5) (2026-05-25)
 
 
