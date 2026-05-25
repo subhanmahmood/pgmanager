@@ -117,6 +117,12 @@ postgres:        # how serve connects to Postgres
   password: ""
   database: postgres
   ssl_mode: require       # use 'disable' only for local development
+  # public_host / public_port — host/port advertised to *clients* in
+  # `db create` / `db info` responses. Unset = derive from the inbound
+  # request Host header (port stripped); last resort is `host`/`port`.
+  # The server's own Postgres connection always uses host/port.
+  public_host: ""
+  public_port: 0
 api:
   listen: 127.0.0.1:8080  # bind address; put a proxy in front for TLS
   require_token: true
@@ -163,6 +169,7 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 
 - `POSTGRES_*` — override server-side `postgres.*` fields.
 - `POSTGRES_SSLMODE` — disable, require, verify-ca, verify-full (default: disable).
+- `POSTGRES_PUBLIC_HOST` / `POSTGRES_PUBLIC_PORT` — what clients see in `db create` / `db info` responses. Falls back to inbound request Host header, then `POSTGRES_HOST` / `POSTGRES_PORT`.
 - `PGMANAGER_LISTEN` — server bind address.
 - `PGMANAGER_REQUIRE_TOKEN` — `true` to require auth (default true).
 - `PGMANAGER_ALLOWED_ORIGINS` — comma-separated CORS list.

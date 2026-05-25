@@ -51,6 +51,10 @@ postgres:
   user: postgres
   password: your_password
   database: postgres
+  # public_host: pgm.example.com   # OPTIONAL — what clients see in connection
+  # public_port: 5432              #   strings. Falls back to the inbound
+  #                                #   request Host header (port stripped),
+  #                                #   then to `host`/`port`.
 
 sqlite:
   path: ./pgmanager.db
@@ -149,11 +153,13 @@ All config values can be overridden with environment variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `POSTGRES_HOST` | PostgreSQL host | `localhost` |
-| `POSTGRES_PORT` | PostgreSQL port | `5432` |
+| `POSTGRES_HOST` | PostgreSQL host (server-internal) | `localhost` |
+| `POSTGRES_PORT` | PostgreSQL port (server-internal) | `5432` |
 | `POSTGRES_USER` | PostgreSQL user | `postgres` |
 | `POSTGRES_PASSWORD` | PostgreSQL password | |
 | `POSTGRES_DATABASE` | PostgreSQL database | `postgres` |
+| `POSTGRES_PUBLIC_HOST` | Client-reachable host advertised in `db create` / `db info` responses. Falls back to the inbound request `Host` header, then `POSTGRES_HOST`. | |
+| `POSTGRES_PUBLIC_PORT` | Client-reachable port advertised in `db create` / `db info` responses. Defaults to `POSTGRES_PORT`. | |
 | `PGMANAGER_SQLITE_PATH` | SQLite database location | `./data/pgmanager.db` |
 | `PGMANAGER_API_PORT` | API server port | `8080` |
 | `PGMANAGER_API_TOKEN` | Bearer token for API auth | |

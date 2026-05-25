@@ -38,6 +38,13 @@ type PostgresConfig struct {
 	Password string `yaml:"password"`
 	Database string `yaml:"database"`
 	SSLMode  string `yaml:"ssl_mode"` // disable, require, verify-ca, verify-full
+
+	// PublicHost / PublicPort are how *clients* reach Postgres. The server's
+	// own connection uses Host / Port (unchanged). When unset, db responses
+	// fall back to the inbound request's Host header (port stripped), then
+	// finally to Host / Port. See internal/api.Server.publicHostPort.
+	PublicHost string `yaml:"public_host"`
+	PublicPort int    `yaml:"public_port"`
 }
 
 type APIConfig struct {
@@ -130,6 +137,14 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if sslMode := os.Getenv("POSTGRES_SSLMODE"); sslMode != "" {
 		cfg.Postgres.SSLMode = sslMode
+	}
+	if host := os.Getenv("POSTGRES_PUBLIC_HOST"); host != "" {
+		cfg.Postgres.PublicHost = host
+	}
+	if port := os.Getenv("POSTGRES_PUBLIC_PORT"); port != "" {
+		if p, err := strconv.Atoi(port); err == nil {
+			cfg.Postgres.PublicPort = p
+		}
 	}
 	if listen := os.Getenv("PGMANAGER_LISTEN"); listen != "" {
 		cfg.API.Listen = listen
@@ -243,4 +258,22 @@ func parseB64Key(s string) ([]byte, error) {
 func (c *PostgresConfig) ConnectionString() string {
 	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		c.Host, c.Port, c.User, c.Password, c.Database, c.SSLMode)
+}
+
+// EffectiveHost returns the host that should be advertised to clients —
+// PublicHost if set, otherwise the server-side Host. Used by code paths that
+// have no inbound HTTP request to inspect (local mode, project.Manager).
+func (c *PostgresConfig) EffectiveHost() string {
+	if c.PublicHost != "" {
+		return c.PublicHost
+	}
+	return c.Host
+}
+
+// EffectivePort mirrors EffectiveHost for the port.
+func (c *PostgresConfig) EffectivePort() int {
+	if c.PublicPort != 0 {
+		return c.PublicPort
+	}
+	return c.Port
 }
