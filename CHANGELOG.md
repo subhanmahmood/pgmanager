@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/subhanmahmood/pgmanager/compare/v0.1.4...v0.1.5) (2026-05-25)
+
+
+### Bug Fixes
+
+* **deploy:** wire POSTGRES_PUBLIC_HOST into the docker-compose stack ([#15](https://github.com/subhanmahmood/pgmanager/issues/15)) ([7323fd5](https://github.com/subhanmahmood/pgmanager/commit/7323fd57be1935ed45bf0b3ff5939b65584a6b41))
+
 ## [0.1.4](https://github.com/subhanmahmood/pgmanager/compare/v0.1.3...v0.1.4) (2026-05-25)
 
 
