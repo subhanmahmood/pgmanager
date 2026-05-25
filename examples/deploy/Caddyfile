@@ -5,6 +5,11 @@
     encode zstd gzip
 
     reverse_proxy pgmanager:8080 {
+        # Preserve the original Host header so pgmanager can derive the
+        # client-reachable hostname for connection strings. Without this,
+        # Caddy rewrites Host to "pgmanager:8080" (the upstream address)
+        # and `db create` responses fall back to POSTGRES_HOST.
+        header_up Host              {host}
         header_up X-Forwarded-Proto {scheme}
         header_up X-Forwarded-For   {remote_host}
     }

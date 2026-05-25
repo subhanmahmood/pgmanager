@@ -28,6 +28,12 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DATABASE: postgres
       POSTGRES_SSLMODE: disable          # internal network only
+      # What clients see in `db create` / `db info` connection strings.
+      # Defaults to PGMANAGER_API_DOMAIN — i.e. the same hostname Caddy
+      # serves the API on. Override POSTGRES_PUBLIC_HOST in .env if
+      # Postgres lives on a different DNS name than the API.
+      POSTGRES_PUBLIC_HOST: ${POSTGRES_PUBLIC_HOST:-${PGMANAGER_API_DOMAIN}}
+      POSTGRES_PUBLIC_PORT: ${POSTGRES_PUBLIC_PORT:-5432}
       PGMANAGER_LISTEN: 0.0.0.0:8080
       PGMANAGER_REQUIRE_TOKEN: "true"
       PGMANAGER_ENCRYPTION_KEY: ${PGMANAGER_ENCRYPTION_KEY:?run `pgmanager keygen` and set PGMANAGER_ENCRYPTION_KEY}
