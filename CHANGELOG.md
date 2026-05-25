@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/subhanmahmood/pgmanager/compare/v0.1.1...v0.1.2) (2026-05-25)
+
+
+### Documentation
+
+* document --extension flag in README CLI section ([5e859fe](https://github.com/subhanmahmood/pgmanager/commit/5e859febc37938662239b2a3dfb443cb869ee59a))
+
 ## [0.1.1](https://github.com/subhanmahmood/pgmanager/compare/v0.1.0...v0.1.1) (2026-05-24)
 
 
