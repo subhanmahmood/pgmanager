@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/subhanmahmood/pgmanager/compare/v0.1.2...v0.1.3) (2026-05-25)
+
+
+### Features
+
+* add `pgmanager update` self-update command ([#10](https://github.com/subhanmahmood/pgmanager/issues/10)) ([e0cf1cf](https://github.com/subhanmahmood/pgmanager/commit/e0cf1cfaeb1e833be056ac06bb2ad60443e407d6))
+
 ## [0.1.2](https://github.com/subhanmahmood/pgmanager/compare/v0.1.1...v0.1.2) (2026-05-25)
 
 
