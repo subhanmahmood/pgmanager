@@ -1,237 +1,187 @@
 # pgmanager
 
-A PostgreSQL database management tool with project-based organization. Supports CLI, REST API, and Terminal UI interfaces.
+A small Go service + CLI for creating, listing, and deleting PostgreSQL databases per project. Built for the case where you want isolated databases per environment (`prod`, `dev`, `staging`) plus ephemeral PR databases for CI — without handing Postgres credentials to laptops or pipelines.
 
-## Features
+## What you actually run
 
-- **Project-based organization** - Group databases by project with environment separation
-- **Multi-environment support** - `prod`, `dev`, `staging`, and ephemeral `pr` databases
-- **Automatic naming** - Consistent `{project}_{env}` naming with auto-generated credentials
-- **TTL management** - PR databases auto-expire with configurable TTL (default 7 days)
-- **Multiple interfaces** - CLI, REST API, Terminal UI, and Web UI
-- **Dual storage** - PostgreSQL for databases, SQLite for metadata tracking
+Three pieces, easy to keep distinct:
 
-## Installation
+- **CLI** (`pgmanager`) — what you install on your laptop and in CI. Talks to the Server over HTTPS with a scoped bearer token.
+- **Server** (`pgmanager serve`) — the HTTP API. Holds the Postgres credentials. Lives behind a reverse proxy on a VPS.
+- **Deployment** — the bundled docker-compose stack: Postgres + Server + Caddy (auto-TLS). See [`examples/deploy/`](examples/deploy/).
 
-### From Source
-
-```bash
-go build -o pgmanager ./cmd/pgmanager
+```
+Laptop / CI ──HTTPS + scoped token──► Caddy ─► pgmanager serve ─► Postgres
+                                       (443)    (127.0.0.1:8080)   (never exposed)
 ```
 
-### Docker
+All metadata (projects, databases, tokens) lives in a `pgmanager` schema inside the same Postgres server. DB passwords stored there are AES-256-GCM encrypted at rest.
+
+## Install the CLI
 
 ```bash
-docker build -t pgmanager:latest .
+curl -sSL https://raw.githubusercontent.com/subhanmahmood/pgmanager/master/install.sh | bash
 ```
 
-### Updating
+Or grab a binary from [Releases](https://github.com/subhanmahmood/pgmanager/releases). Self-update later with `pgmanager update`.
 
-Once installed, pgmanager can update itself in place from GitHub Releases:
+## Quick start — laptop
 
 ```bash
-pgmanager update              # update to the latest stable release
+pgmanager login https://pgm.example.com
+# paste the bootstrap admin token
+
+pgmanager auth whoami           # sanity check
+pgmanager project create myapp
+pgmanager db create myapp dev
+pgmanager db credentials myapp dev   # shows the connection string
+```
+
+Profile lives at `~/.config/pgmanager/credentials.yaml` (mode 0600).
+
+## Quick start — CI
+
+CI never holds Postgres credentials, only `(api_url, token)`:
+
+```yaml
+- run: curl -sSL https://raw.githubusercontent.com/subhanmahmood/pgmanager/master/install.sh | bash
+
+- name: Create PR database
+  run: pgmanager db create myapp pr "${{ github.event.pull_request.number }}" --json > db.json
+  env:
+    PGMANAGER_API_URL: ${{ vars.PGMANAGER_API_URL }}
+    PGMANAGER_API_TOKEN: ${{ secrets.PGMANAGER_CI_TOKEN }}
+
+- run: echo "DATABASE_URL=$(jq -r .connection_string db.json)" >> $GITHUB_ENV
+```
+
+Mint the CI token from your laptop:
+
+```bash
+pgmanager auth create-token \
+  --name "github-ci-myapp" \
+  --scope "project:myapp:pr:*" \
+  --expires 90d
+```
+
+A leaked CI token can only create/delete PR databases in one project — it cannot touch prod, other projects, or admin endpoints.
+
+## Quick start — VPS (Deployment)
+
+The shipped Deployment is docker-compose with Caddy fronting it for HTTPS:
+
+```bash
+ssh root@vps
+git clone https://github.com/subhanmahmood/pgmanager.git
+cd pgmanager/examples/deploy
+cp .env.example .env       # then $EDITOR .env
+docker compose up -d
+docker compose exec pgmanager cat /var/lib/pgmanager/bootstrap-token.txt
+```
+
+Full walkthrough — including TLS, secrets, and the `upgrade.sh` workflow — in [`examples/deploy/README.md`](examples/deploy/README.md).
+
+## CLI commands
+
+```
+pgmanager login <url>              Save an API token under a profile
+pgmanager logout [profile]         Remove a profile
+pgmanager profile list|use|show    Manage saved profiles
+pgmanager doctor                   Diagnose: profile, token, server reachability
+pgmanager auth whoami              Show current token + scopes
+pgmanager auth list-tokens         Enumerate tokens (admin/tokens scope)
+pgmanager auth create-token        Mint a scoped token
+pgmanager auth revoke-token <pfx>  Revoke a token by its prefix
+pgmanager project create|list|delete
+pgmanager db create|list|info|credentials|delete
+                                   db create accepts -x/--extension (repeatable)
+pgmanager cleanup --older-than 7d  Delete expired PR DBs
+pgmanager tui                      Interactive terminal UI
+pgmanager keygen                   New 32-byte base64 encryption key
+pgmanager update                   Self-update binary
+pgmanager serve                    Run the Server (VPS-side)
+pgmanager version
+```
+
+Add `--json` to any read command for machine-parseable output. `--profile <name>` overrides the active profile for one invocation.
+
+## Scoped tokens
+
+| Scope | Authorizes |
+|-------|------------|
+| `admin` | Everything |
+| `tokens` | Token CRUD only (no DB access) |
+| `project:*` | All projects, all environments |
+| `project:<name>` | One project, all environments |
+| `project:<name>:env:<env>` | One project, one specific environment |
+| `project:<name>:pr:*` | One project, PR databases only (the CI scope) |
+
+Plaintext tokens are returned **once** at creation; the Server stores only their SHA-256 plus a 16-char display prefix.
+
+## Configuration
+
+Two config files; they serve different audiences and never mix.
+
+**`credentials.yaml`** (client) — `~/.config/pgmanager/credentials.yaml`, mode 0600. Holds named profiles managed via `login` / `logout` / `profile use`.
+
+**`pgmanager.yaml`** (server) — read only by `pgmanager serve`. Auto-discovered in `cwd → ~ → ~/.config/pgmanager/ → /etc/pgmanager/`.
+
+The most important environment overrides:
+
+| Variable | Side | Purpose |
+|---|---|---|
+| `PGMANAGER_API_URL` + `PGMANAGER_API_TOKEN` | client | Synthesize an `env` profile; bypasses `credentials.yaml` (CI path) |
+| `PGMANAGER_PROFILE` | client | Pick a saved profile by name |
+| `POSTGRES_*` | server | Override `postgres.*` (host, port, user, password, database, sslmode) |
+| `POSTGRES_PUBLIC_HOST` / `POSTGRES_PUBLIC_PORT` | server | What clients see in `db create` / `db info` responses |
+| `PGMANAGER_LISTEN` | server | Bind address (default `127.0.0.1:8080`) |
+| `PGMANAGER_ENCRYPTION_KEY` | server | base64 32-byte at-rest encryption key |
+| `PGMANAGER_BOOTSTRAP_TOKEN` | server | Pre-seed initial admin token (skip auto-generation) |
+| `PGMANAGER_DATA_DIR` | server | Where `bootstrap-token.txt` is written |
+
+Full reference in the agent skill ([`.claude/skills/pgmanager/SKILL.md`](.claude/skills/pgmanager/SKILL.md) for client, [`.claude/skills/pgmanager-server/SKILL.md`](.claude/skills/pgmanager-server/SKILL.md) for VPS operations).
+
+## REST API
+
+Same surface the CLI talks to. All endpoints under `/api`; everything except `/api/health` requires `Authorization: Bearer pgm_live_...`.
+
+```bash
+TOKEN=pgm_live_xxx
+API=https://pgm.example.com
+
+curl -sS -H "Authorization: Bearer $TOKEN" $API/api/auth/whoami | jq
+
+curl -sS -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"env":"pr","pr_number":42}' \
+  $API/api/projects/myapp/databases | jq
+```
+
+Full endpoint table + scope requirements in the skill files.
+
+## Self-updating
+
+```bash
+pgmanager update              # to the latest stable release
 pgmanager update --check      # report if an update is available (exit 1 if so)
 pgmanager update --version v0.2.0   # pin to a specific tag
 ```
 
-The downloaded binary is verified against the release `checksums.txt` before
-the running binary is atomically replaced. See `pgmanager update --help` for
-`--force`, `--prerelease`, and `--dry-run`.
-
-## Quick Start
-
-1. Create a configuration file:
-
-```yaml
-# config.yaml
-postgres:
-  host: localhost
-  port: 5432
-  user: postgres
-  password: your_password
-  database: postgres
-  # public_host: pgm.example.com   # OPTIONAL — what clients see in connection
-  # public_port: 5432              #   strings. Falls back to the inbound
-  #                                #   request Host header (port stripped),
-  #                                #   then to `host`/`port`.
-
-sqlite:
-  path: ./pgmanager.db
-
-api:
-  port: 8080
-  token: ""  # Optional Bearer token
-
-cleanup:
-  default_ttl: 168h  # 7 days
-```
-
-2. Create a project and database:
-
-```bash
-./pgmanager --config config.yaml project create myapp
-./pgmanager --config config.yaml db create myapp dev
-./pgmanager --config config.yaml db info myapp dev
-```
-
-## CLI Commands
-
-### Projects
-
-```bash
-pgmanager project create <name>     # Create new project
-pgmanager project list              # List all projects
-pgmanager project delete <name>     # Delete project and all its databases
-```
-
-### Databases
-
-```bash
-pgmanager db create <project> <env> [pr-number]  # Create database
-pgmanager db create myapp dev -x vector -x pg_trgm  # ...with extensions installed
-pgmanager db delete <project> <env> [pr-number]  # Delete database
-pgmanager db list [project]                      # List databases
-pgmanager db info <project> <env> [pr-number]    # Get connection info
-```
-
-Pass `--extension`/`-x` one or more times to install Postgres extensions
-into the new database immediately after creation. Names must match
-`^[a-zA-Z][a-zA-Z0-9_-]*$` (hyphen kept so `uuid-ossp` works). If any
-extension fails to install the new database is dropped, so you never
-end up with a half-provisioned DB in the metadata store.
-
-### Server & UI
-
-```bash
-pgmanager serve [-p 8080]    # Start REST API server
-pgmanager tui                # Launch Terminal UI
-pgmanager cleanup            # Clean up expired PR databases
-pgmanager update             # Self-update to the latest release
-```
-
-## REST API
-
-Start the server with `pgmanager serve`. Authentication via Bearer token is optional (configure `api.token`).
-
-### Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/projects` | List all projects |
-| POST | `/api/projects` | Create project |
-| DELETE | `/api/projects/{name}` | Delete project |
-| GET | `/api/projects/{name}/databases` | List project databases |
-| POST | `/api/projects/{name}/databases` | Create database |
-| GET | `/api/projects/{name}/databases/{env}` | Get database info |
-| DELETE | `/api/projects/{name}/databases/{env}` | Delete database |
-| POST | `/api/cleanup` | Clean up expired databases |
-| GET | `/health` | Health check (no auth) |
-
-### Example
-
-```bash
-# Create a project
-curl -X POST http://localhost:8080/api/projects \
-  -H "Content-Type: application/json" \
-  -d '{"name": "myapp"}'
-
-# Create a dev database
-curl -X POST http://localhost:8080/api/projects/myapp/databases \
-  -H "Content-Type: application/json" \
-  -d '{"env": "dev"}'
-
-# Get connection info
-curl http://localhost:8080/api/projects/myapp/databases/dev
-```
-
-## Configuration
-
-### Environment Variables
-
-All config values can be overridden with environment variables:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `POSTGRES_HOST` | PostgreSQL host (server-internal) | `localhost` |
-| `POSTGRES_PORT` | PostgreSQL port (server-internal) | `5432` |
-| `POSTGRES_USER` | PostgreSQL user | `postgres` |
-| `POSTGRES_PASSWORD` | PostgreSQL password | |
-| `POSTGRES_DATABASE` | PostgreSQL database | `postgres` |
-| `POSTGRES_PUBLIC_HOST` | Client-reachable host advertised in `db create` / `db info` responses. Falls back to the inbound request `Host` header, then `POSTGRES_HOST`. | |
-| `POSTGRES_PUBLIC_PORT` | Client-reachable port advertised in `db create` / `db info` responses. Defaults to `POSTGRES_PORT`. | |
-| `PGMANAGER_SQLITE_PATH` | SQLite database location | `./data/pgmanager.db` |
-| `PGMANAGER_API_PORT` | API server port | `8080` |
-| `PGMANAGER_API_TOKEN` | Bearer token for API auth | |
-
-## Docker Usage
-
-### Build
-
-```bash
-docker build -t pgmanager:latest .
-```
-
-### Run Commands via Docker
-
-```bash
-# List projects
-docker run --rm -v "$(pwd)/config.yaml:/etc/pgmanager/config.yaml" \
-  pgmanager:latest pgmanager --config /etc/pgmanager/config.yaml project list
-
-# Create a database
-docker run --rm -v "$(pwd)/config.yaml:/etc/pgmanager/config.yaml" \
-  pgmanager:latest pgmanager --config /etc/pgmanager/config.yaml db create myproject dev
-
-# Start API server
-docker run --rm -p 8080:8080 -v "$(pwd)/config.yaml:/etc/pgmanager/config.yaml" \
-  pgmanager:latest pgmanager --config /etc/pgmanager/config.yaml serve -p 8080
-```
-
-### Shell Alias
-
-Add to `~/.zshrc` or `~/.bashrc` for convenience:
-
-```bash
-alias pgmanager='docker run --rm -it -p 8080:8080 -v "/path/to/config.yaml:/etc/pgmanager/config.yaml" -v "/path/to/data:/data" pgmanager:latest pgmanager --config /etc/pgmanager/config.yaml'
-```
-
-Then use from anywhere:
-
-```bash
-pgmanager project list
-pgmanager db create myapp dev
-pgmanager serve -p 8080
-```
-
-### Docker Deployment (daemon)
-
-```bash
-docker run -d \
-  -p 8080:8080 \
-  -v ./config.yaml:/etc/pgmanager/config.yaml \
-  -v pgmanager-data:/data \
-  pgmanager:latest pgmanager --config /etc/pgmanager/config.yaml serve
-```
-
-## Naming Conventions
-
-- **Project names**: 2-32 characters, lowercase alphanumeric and underscores, must start with a letter
-- **Reserved names**: `postgres`, `template0`, `template1`, `admin`, `root`, `system`
-- **Database naming**: `{project}_{env}` or `{project}_pr_{number}`
-- **User naming**: `{database_name}_user`
+The downloaded binary is verified against the release `checksums.txt` before the running binary is atomically replaced.
 
 ## Development
 
 ```bash
-# Run tests
-go test ./...
-
-# Run tests with verbose output
-go test -v ./internal/...
-
-# Run a specific test
+go test ./...                          # all tests
+go test -v ./internal/...              # verbose
 go test -run TestValidateName ./internal/project
+go build -o pgmanager ./cmd/pgmanager
+```
+
+Or with Docker:
+
+```bash
+docker run --rm -v "$(pwd):/app" -w /app golang:1.23-alpine \
+  sh -c "go test ./..."
 ```
 
 ## License
