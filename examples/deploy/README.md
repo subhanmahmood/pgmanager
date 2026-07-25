@@ -4,7 +4,9 @@ Five steps to a working remote pgmanager that your laptop and CI talk to over HT
 
 ## Prerequisites
 - A VPS with Docker + Docker Compose installed.
-- A DNS A/AAAA record pointing a hostname (e.g. `pgm.example.com`) at the VPS.
+- DNS A/AAAA records pointing two hostnames at the VPS:
+  - `pgm.example.com` — the API, for the CLI and CI.
+  - `admin.pgm.example.com` — the browser admin UI.
 - Ports 80 and 443 open to the public; **port 5432 stays closed**.
 
 ## 1. Pull the deploy bundle
@@ -26,8 +28,9 @@ sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 24)/" .env
 # At-rest encryption key for stored DB passwords
 sed -i "s|^PGMANAGER_ENCRYPTION_KEY=.*|PGMANAGER_ENCRYPTION_KEY=$(openssl rand -base64 32)|" .env
 
-# Domain Caddy should serve
+# Domains Caddy should serve
 $EDITOR .env  # set PGMANAGER_API_DOMAIN=pgm.example.com
+              # optionally PGMANAGER_ADMIN_DOMAIN (defaults to admin.<api domain>)
 ```
 
 > Tip: if you already have the `pgmanager` binary, `pgmanager keygen` generates the encryption key in the right format.
@@ -73,6 +76,20 @@ pgmanager auth create-token \
 ```
 
 Drop the printed token into your CI secret store as `PGMANAGER_CI_TOKEN`.
+
+## 6. (Optional) Use the admin UI
+
+Open `https://admin.pgm.example.com` and paste an API token to sign in. The UI
+covers projects, databases, credentials and token management — the same
+operations as the CLI, backed by the same `/api` endpoints.
+
+The token is held in that browser's `localStorage` and sent as a bearer token
+to the same origin; nothing else is stored client-side. Because it is just an
+API token, scope it to what the person needs — hand out `project:<name>` rather
+than `admin` where you can, and revoke it from the Tokens view when done.
+
+To run without the UI (API only), set `PGMANAGER_WEB_DIR=-` on the `pgmanager`
+service and drop the admin site block from the `Caddyfile`.
 
 ---
 

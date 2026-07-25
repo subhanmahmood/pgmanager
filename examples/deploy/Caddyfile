@@ -1,7 +1,14 @@
 # Caddy fronts pgmanager with automatic HTTPS via Let's Encrypt.
 # `pgmanager` listens on :8080 inside the docker network only.
+#
+# Two hostnames, one upstream:
+#   PGMANAGER_API_DOMAIN   — the API the CLI and CI talk to.
+#   PGMANAGER_ADMIN_DOMAIN — the browser admin UI (defaults to admin.<api domain>).
+#
+# The UI is served same-origin with the API it calls, so no CORS config is
+# needed and the bearer token never crosses an origin boundary.
 
-{$PGMANAGER_API_DOMAIN} {
+(pgmanager_upstream) {
     encode zstd gzip
 
     reverse_proxy pgmanager:8080 {
@@ -13,4 +20,16 @@
         header_up X-Forwarded-Proto {scheme}
         header_up X-Forwarded-For   {remote_host}
     }
+}
+
+{$PGMANAGER_API_DOMAIN} {
+    import pgmanager_upstream
+}
+
+# Admin UI. Requests arriving here carry the admin hostname in Host, which
+# would otherwise leak into connection strings via the Host-header fallback.
+# docker-compose pins POSTGRES_PUBLIC_HOST to the API domain so the advertised
+# Postgres host never depends on which hostname a request came in on.
+{$PGMANAGER_ADMIN_DOMAIN} {
+    import pgmanager_upstream
 }

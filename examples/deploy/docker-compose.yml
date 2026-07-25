@@ -55,6 +55,10 @@ services:
       - "443:443"
     environment:
       PGMANAGER_API_DOMAIN: ${PGMANAGER_API_DOMAIN:?PGMANAGER_API_DOMAIN is required}
+      # Hostname for the browser admin UI. Both hostnames must resolve to this
+      # host before `docker compose up` — Caddy provisions a certificate for
+      # each one on first request.
+      PGMANAGER_ADMIN_DOMAIN: ${PGMANAGER_ADMIN_DOMAIN:-admin.${PGMANAGER_API_DOMAIN}}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
