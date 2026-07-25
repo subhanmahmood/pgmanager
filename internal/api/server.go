@@ -87,14 +87,62 @@ func (s *Server) setupRoutes() {
 		r.Post("/cleanup", s.cleanup)
 	})
 
-	// Optional static web UI.
-	webDir := "./web"
-	if _, err := os.Stat(webDir); err == nil {
-		fileServer := http.FileServer(http.Dir(webDir))
-		r.Handle("/*", fileServer)
+	// Optional static admin UI.
+	if webDir := s.webDir(); webDir != "" {
+		r.Handle("/*", staticHandler(webDir))
 	}
 
 	s.router = r
+}
+
+// webDir resolves the directory to serve the admin UI from. Empty means
+// "don't serve a UI": either it was explicitly disabled with web_dir: "-"
+// (PGMANAGER_WEB_DIR=-) or the directory does not exist.
+func (s *Server) webDir() string {
+	dir := s.cfg.API.WebDir
+	if dir == "-" {
+		return ""
+	}
+	if dir == "" {
+		dir = "./web"
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	return dir
+}
+
+// staticHandler serves the admin UI. Unknown paths fall back to index.html so
+// the SPA owns its own routing, but anything under /api is never served from
+// disk — an unmatched API path must stay a 404, not silently return HTML.
+func staticHandler(dir string) http.Handler {
+	fs := http.FileServer(http.Dir(dir))
+	index := filepath.Join(dir, "index.html")
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.NotFound(w, r)
+			return
+		}
+
+		clean := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
+		if clean == "." || clean == "/" || clean == ".." || strings.HasPrefix(clean, "../") {
+			http.ServeFile(w, r, index)
+			return
+		}
+		// http.Dir already rejects traversal; this is about choosing between
+		// "serve the real file" and "hand the SPA its route".
+		if info, err := os.Stat(filepath.Join(dir, clean)); err != nil || info.IsDir() {
+			http.ServeFile(w, r, index)
+			return
+		}
+		fs.ServeHTTP(w, r)
+	})
 }
 
 // Start binds and serves. Returns after graceful shutdown or fatal error.

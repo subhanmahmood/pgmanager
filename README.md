@@ -4,15 +4,16 @@ A small Go service + CLI for creating, listing, and deleting PostgreSQL database
 
 ## What you actually run
 
-Three pieces, easy to keep distinct:
+Four pieces, easy to keep distinct:
 
 - **CLI** (`pgmanager`) — what you install on your laptop and in CI. Talks to the Server over HTTPS with a scoped bearer token.
 - **Server** (`pgmanager serve`) — the HTTP API. Holds the Postgres credentials. Lives behind a reverse proxy on a VPS.
+- **Admin UI** — a static browser UI the Server hosts alongside the API, for the same operations without the CLI. See [Admin UI](#admin-ui).
 - **Deployment** — the bundled docker-compose stack: Postgres + Server + Caddy (auto-TLS). See [`examples/deploy/`](examples/deploy/).
 
 ```
 Laptop / CI ──HTTPS + scoped token──► Caddy ─► pgmanager serve ─► Postgres
-                                       (443)    (127.0.0.1:8080)   (never exposed)
+Browser ─────HTTPS + scoped token──►  (443)    (127.0.0.1:8080)   (never exposed)
 ```
 
 All metadata (projects, databases, tokens) lives in a `pgmanager` schema inside the same Postgres server. DB passwords stored there are AES-256-GCM encrypted at rest.
@@ -80,6 +81,25 @@ docker compose exec pgmanager cat /var/lib/pgmanager/bootstrap-token.txt
 ```
 
 Full walkthrough — including TLS, secrets, and the `upgrade.sh` workflow — in [`examples/deploy/README.md`](examples/deploy/README.md).
+
+## Admin UI
+
+`pgmanager serve` also hosts a static browser UI from its `./web` directory —
+projects, databases, connection credentials, token management and PR cleanup,
+against the same `/api` endpoints the CLI uses.
+
+The bundled Deployment serves it on `admin.<your API domain>` (override with
+`PGMANAGER_ADMIN_DOMAIN`). Point a DNS record at the VPS and Caddy issues the
+certificate on first request; both hostnames reach the same process, so the UI
+calls the API same-origin and needs no CORS configuration.
+
+Sign in by pasting an API token. It is kept in that browser's `localStorage`
+and sent as a bearer token — so it is exactly as privileged as the token you
+paste. Prefer a `project:<name>` token over `admin` where the person only needs
+one project, and revoke it from the Tokens view when they're done.
+
+Set `PGMANAGER_WEB_DIR` (or `api.web_dir`) to serve the UI from elsewhere, or to
+`-` to run API-only.
 
 ## CLI commands
 

@@ -126,6 +126,9 @@ postgres:        # how serve connects to Postgres
 api:
   listen: 127.0.0.1:8080  # bind address; put a proxy in front for TLS
   require_token: true
+  # web_dir — directory holding the static admin UI. Empty = "./web" if it
+  # exists; "-" disables the UI and serves the JSON API only.
+  web_dir: ""
 crypto:
   key: ""                 # base64, 32 bytes — `pgmanager keygen` to create one
   # key_file: /run/secrets/pgmanager_key  # alternative
@@ -173,6 +176,7 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 - `PGMANAGER_LISTEN` — server bind address.
 - `PGMANAGER_REQUIRE_TOKEN` — `true` to require auth (default true).
 - `PGMANAGER_ALLOWED_ORIGINS` — comma-separated CORS list.
+- `PGMANAGER_WEB_DIR` — directory for the static admin UI (`-` disables it).
 - `PGMANAGER_ENCRYPTION_KEY` — base64 32-byte key for at-rest encryption.
 - `PGMANAGER_DATA_DIR` — where the bootstrap-token file is written.
 - `PGMANAGER_BOOTSTRAP_TOKEN` — operator-supplied initial admin token (skip auto-generation).
@@ -195,6 +199,7 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 - `internal/config/config.go` — server config (`pgmanager.yaml`) loader.
 - `internal/config/client.go` — client config (`credentials.yaml`) loader + profile resolution.
 - `internal/tui/app.go` — Bubble Tea terminal UI; uses `client.Client`, so it works against either transport.
+- `web/` — static admin UI (`index.html` + `app.css` + `app.js`), served by `pgmanager serve` on the same origin as `/api`. The server sends a strict CSP (`script-src 'self'; style-src 'self'`), so the UI must not use inline scripts, inline styles or inline event handlers — all wiring goes through delegated listeners on `data-action` attributes in `app.js`.
 
 ### Key design rules
 

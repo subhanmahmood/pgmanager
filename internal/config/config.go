@@ -53,6 +53,11 @@ type APIConfig struct {
 	Token          string   `yaml:"token"`           // deprecated; use scoped tokens
 	RequireToken   bool     `yaml:"require_token"`   // if true, refuse to start without auth
 	AllowedOrigins []string `yaml:"allowed_origins"` // CORS allowed origins
+
+	// WebDir is the directory holding the static admin UI. Empty means "./web"
+	// if that directory exists; set to "-" to disable serving the UI entirely
+	// (e.g. on a server that should expose the JSON API only).
+	WebDir string `yaml:"web_dir"`
 }
 
 type CleanupConfig struct {
@@ -162,6 +167,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if origins := os.Getenv("PGMANAGER_ALLOWED_ORIGINS"); origins != "" {
 		cfg.API.AllowedOrigins = splitAndTrim(origins, ",")
+	}
+	if webDir := os.Getenv("PGMANAGER_WEB_DIR"); webDir != "" {
+		cfg.API.WebDir = webDir
 	}
 	if key := os.Getenv("PGMANAGER_ENCRYPTION_KEY"); key != "" {
 		cfg.Crypto.Key = key
