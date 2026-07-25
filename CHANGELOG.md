@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/subhanmahmood/pgmanager/compare/v0.1.6...v0.1.7) (2026-07-25)
+
+
+### Features
+
+* **web:** admin UI served on its own hostname ([#22](https://github.com/subhanmahmood/pgmanager/issues/22)) ([14e3c0c](https://github.com/subhanmahmood/pgmanager/commit/14e3c0ccf011bafaeb96c93e29f1a33769d902e0))
+
 ## [0.1.6](https://github.com/subhanmahmood/pgmanager/compare/v0.1.5...v0.1.6) (2026-05-25)
 
 
