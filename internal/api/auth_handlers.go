@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -16,6 +17,8 @@ import (
 type WhoamiResponse struct {
 	TokenPrefix string   `json:"token_prefix"`
 	Scopes      []string `json:"scopes"`
+	// Email is set when the caller is a signed-in human rather than a token.
+	Email string `json:"email,omitempty"`
 }
 
 // TokenResponse is the public view of a token (no secret material).
@@ -50,10 +53,11 @@ func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "missing authentication")
 		return
 	}
-	writeJSON(w, http.StatusOK, WhoamiResponse{
-		TokenPrefix: info.Display,
-		Scopes:      info.Scopes,
-	})
+	resp := WhoamiResponse{TokenPrefix: info.Display, Scopes: info.Scopes}
+	if strings.Contains(info.Display, "@") {
+		resp.Email = info.Display
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) listTokens(w http.ResponseWriter, r *http.Request) {

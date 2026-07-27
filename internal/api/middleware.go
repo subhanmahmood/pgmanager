@@ -76,6 +76,82 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 }
 
 // getClientIP extracts the client IP from the request.
+// LoginLimiter throttles password guessing. The general RateLimiter above is
+// sized for API traffic (100 rps) and is no obstacle at all to an offline-speed
+// guessing loop, so sign-in gets its own much stricter budget, counted per
+// client IP and per submitted email — one attacker shouldn't be able to lock
+// everyone out, and one address shouldn't be attackable from many IPs.
+type LoginLimiter struct {
+	mu       sync.Mutex
+	attempts map[string]*loginAttempts
+	max      int
+	window   time.Duration
+}
+
+type loginAttempts struct {
+	count int
+	first time.Time
+}
+
+// NewLoginLimiter allows max attempts per key per window.
+func NewLoginLimiter(max int, window time.Duration) *LoginLimiter {
+	l := &LoginLimiter{
+		attempts: make(map[string]*loginAttempts),
+		max:      max,
+		window:   window,
+	}
+	go l.cleanup()
+	return l
+}
+
+// Allow records an attempt against every supplied key and reports whether it
+// may proceed. Keys are checked before any is incremented, so a rejected
+// attempt doesn't deepen the hole for an unrelated key.
+func (l *LoginLimiter) Allow(keys ...string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+
+	for _, k := range keys {
+		if a, ok := l.attempts[k]; ok && now.Sub(a.first) < l.window && a.count >= l.max {
+			return false
+		}
+	}
+	for _, k := range keys {
+		a, ok := l.attempts[k]
+		if !ok || now.Sub(a.first) >= l.window {
+			l.attempts[k] = &loginAttempts{count: 1, first: now}
+			continue
+		}
+		a.count++
+	}
+	return true
+}
+
+// Reset clears the counters for a key. Called on a successful sign-in so a
+// few typos don't leave someone locked out afterwards.
+func (l *LoginLimiter) Reset(keys ...string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, k := range keys {
+		delete(l.attempts, k)
+	}
+}
+
+func (l *LoginLimiter) cleanup() {
+	for {
+		time.Sleep(l.window)
+		l.mu.Lock()
+		now := time.Now()
+		for k, a := range l.attempts {
+			if now.Sub(a.first) >= l.window {
+				delete(l.attempts, k)
+			}
+		}
+		l.mu.Unlock()
+	}
+}
+
 func getClientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		if idx := strings.Index(xff, ","); idx != -1 {

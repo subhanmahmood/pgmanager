@@ -82,6 +82,8 @@ var anonymousPaths = map[string]bool{
 	"/api/health":            true,
 	"/api/auth/device":       true,
 	"/api/auth/device/token": true,
+	// Signing in is how you stop being anonymous.
+	"/api/auth/login": true,
 }
 
 // authMiddleware validates the Bearer token and attaches AuthInfo to the
@@ -97,6 +99,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		h := r.Header.Get("Authorization")
 		if h == "" {
+			// No bearer token: this is either the admin UI carrying a session
+			// cookie, or an unauthenticated caller. Machines send tokens;
+			// humans send cookies.
+			if info := s.sessionAuth(r); info != nil {
+				next.ServeHTTP(w, r.WithContext(contextWithAuth(r.Context(), info)))
+				return
+			}
 			writeError(w, http.StatusUnauthorized, "missing authorization header")
 			return
 		}
@@ -141,6 +150,27 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// sessionAuth resolves the admin-UI session cookie into a principal, or nil
+// if there isn't a usable one. Every allowlisted human is admin: being in a
+// table only the server itself can write is the authorization.
+func (s *Server) sessionAuth(r *http.Request) *AuthInfo {
+	c, err := r.Cookie(auth.SessionCookieName)
+	if err != nil || c.Value == "" {
+		return nil
+	}
+	sess, err := s.store.GetSessionByHash(r.Context(), auth.HashToken(c.Value))
+	if err != nil {
+		log.Printf("session lookup: %v", err)
+		return nil
+	}
+	if sess == nil || sess.Expired(time.Now()) {
+		return nil
+	}
+	// Display is the email, so the audit log names a person rather than a
+	// token prefix — the whole point of having humans in the system.
+	return &AuthInfo{Display: sess.Email, Scopes: []string{auth.ScopeAdmin}}
 }
 
 // localAuthMiddleware authenticates requests arriving over the local unix

@@ -86,6 +86,7 @@ func newRootCmd() *cobra.Command {
 		newLogoutCmd(),
 		newProfileCmd(),
 		newAuthCmd(),
+		newUsersCmd(),
 		newDoctorCmd(),
 		newKeygenCmd(),
 		newUpdateCmd(),
@@ -951,6 +952,161 @@ func newAuthCmd() *cobra.Command {
 	})
 
 	return cmd
+}
+
+// --- users ------------------------------------------------------------------
+
+// newUsersCmd manages the allowlist of humans who can sign in to the admin
+// UI. These endpoints exist only on the local admin socket, so every command
+// here must be run on the server itself — that restriction is the whole
+// reason the allowlist can be trusted.
+func newUsersCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "users",
+		Short: "Manage admin UI users (server-side only)",
+		Long: "Manage the allowlist of people who can sign in to the admin UI.\n\n" +
+			"These commands only work on the machine running `pgmanager serve`,\n" +
+			"because they go over its local admin socket. That is deliberate: it\n" +
+			"means no token \u2014 however privileged or however leaked \u2014 can add a user\n" +
+			"remotely.",
+	}
+
+	addCmd := &cobra.Command{
+		Use:   "add <email>",
+		Short: "Add a user and print a generated password once",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			password, err := passwordFromFlags(cmd)
+			if err != nil {
+				return err
+			}
+			c, _, err := getClient()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			created, err := c.CreateUser(ctx, args[0], password)
+			if err != nil {
+				return err
+			}
+			return emit(created, func() {
+				fmt.Printf("Added %s\n", created.User.Email)
+				if created.Password != "" {
+					fmt.Println("\nPASSWORD (save this \u2014 it will not be shown again):")
+					fmt.Println("  " + created.Password)
+					fmt.Println("\nThey can change it from the admin UI after signing in.")
+				}
+			})
+		},
+	}
+	addCmd.Flags().Bool("password-stdin", false, "read the password from stdin instead of generating one")
+	cmd.AddCommand(addCmd)
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List admin UI users",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			c, _, err := getClient()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			users, err := c.ListUsers(ctx)
+			if err != nil {
+				return err
+			}
+			return emit(users, func() {
+				if len(users) == 0 {
+					fmt.Println("No users \u2014 the admin UI cannot be signed into.")
+					fmt.Println("Add one with: pgmanager users add <email>")
+					return
+				}
+				fmt.Printf("%-32s %-20s %s\n", "EMAIL", "ADDED", "LAST LOGIN")
+				fmt.Println(strings.Repeat("-", 74))
+				for _, u := range users {
+					last := "never"
+					if u.LastLoginAt != nil {
+						last = *u.LastLoginAt
+					}
+					fmt.Printf("%-32s %-20s %s\n", u.Email, u.CreatedAt, last)
+				}
+			})
+		},
+	})
+
+	setPwCmd := &cobra.Command{
+		Use:   "set-password <email>",
+		Short: "Reset a user's password (this is the forgot-password path)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			password, err := passwordFromFlags(cmd)
+			if err != nil {
+				return err
+			}
+			c, _, err := getClient()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			out, err := c.SetUserPassword(ctx, args[0], password)
+			if err != nil {
+				return err
+			}
+			return emit(out, func() {
+				fmt.Printf("Password reset for %s \u2014 existing sessions were signed out\n", args[0])
+				if out.Password != "" {
+					fmt.Println("\nPASSWORD (save this \u2014 it will not be shown again):")
+					fmt.Println("  " + out.Password)
+				}
+			})
+		},
+	}
+	setPwCmd.Flags().Bool("password-stdin", false, "read the new password from stdin instead of generating one")
+	cmd.AddCommand(setPwCmd)
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "remove <email>",
+		Short: "Remove a user and sign out their sessions",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			c, _, err := getClient()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			if err := c.DeleteUser(ctx, args[0]); err != nil {
+				return err
+			}
+			return emit(map[string]string{"status": "removed", "email": args[0]}, func() {
+				fmt.Printf("Removed %s \u2014 their sessions are gone too\n", args[0])
+			})
+		},
+	})
+
+	return cmd
+}
+
+// passwordFromFlags reads a password from stdin when --password-stdin is set.
+// An empty return means "let the server generate one", which is the default:
+// it avoids a terminal-echo dependency and matches how tokens already work.
+func passwordFromFlags(cmd *cobra.Command) (string, error) {
+	fromStdin, _ := cmd.Flags().GetBool("password-stdin")
+	if !fromStdin {
+		return "", nil
+	}
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return "", fmt.Errorf("read password from stdin: %w", err)
+	}
+	password := strings.TrimRight(line, "\r\n")
+	if password == "" {
+		return "", fmt.Errorf("no password on stdin")
+	}
+	return password, nil
 }
 
 // --- doctor & keygen --------------------------------------------------------

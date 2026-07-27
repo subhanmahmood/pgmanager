@@ -28,8 +28,13 @@ Two ways to reach it, chosen by where you're standing:
 | **API** | Laptops, CI, anywhere that isn't the server itself | Just `(api_url, scoped_token)` |
 | **Socket** | On the box running `serve` | Nothing — permission to open the socket *is* the authorization |
 
-Both run through the same handlers, so every request is scope-checked and
-recorded in the audit log.
+A third caller exists but is not the CLI's business: a **human in the admin
+UI**, who signs in with an allowlisted email and password and gets a session
+cookie. Humans get sessions, machines get tokens — `pgmanager users` (server-
+side only) manages people, `pgmanager auth create-token` manages machines.
+
+Both CLI transports run through the same handlers, so every request is
+scope-checked and recorded in the audit log.
 
 ```
 Laptop ──HTTPS+token──► Caddy ─► pgmanager serve ─► Postgres (localhost on VPS)

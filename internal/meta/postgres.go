@@ -107,6 +107,29 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 
 	CREATE INDEX IF NOT EXISTS idx_device_requests_user_code ON pgmanager.device_requests(user_code);
 	CREATE INDEX IF NOT EXISTS idx_device_requests_expires_at ON pgmanager.device_requests(expires_at);
+
+	CREATE TABLE IF NOT EXISTS pgmanager.users (
+		id SERIAL PRIMARY KEY,
+		email TEXT UNIQUE NOT NULL,
+		password_hash TEXT NOT NULL,
+		created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+		created_by TEXT,
+		last_login_at TIMESTAMPTZ,
+		disabled_at TIMESTAMPTZ
+	);
+
+	CREATE TABLE IF NOT EXISTS pgmanager.sessions (
+		id SERIAL PRIMARY KEY,
+		token_hash BYTEA UNIQUE NOT NULL,
+		user_id INTEGER NOT NULL REFERENCES pgmanager.users(id) ON DELETE CASCADE,
+		created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+		expires_at TIMESTAMPTZ NOT NULL,
+		last_seen_at TIMESTAMPTZ,
+		created_ip TEXT
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_sessions_user ON pgmanager.sessions(user_id);
+	CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON pgmanager.sessions(expires_at);
 	`
 	if _, err := s.pool.Exec(ctx, base); err != nil {
 		return err
@@ -697,4 +720,159 @@ func (s *PostgresStore) scanDeviceRow(rows pgx.Rows) (*DeviceRequest, error) {
 		d.IssuedToken = string(plain)
 	}
 	return &d, nil
+}
+
+// --- User operations ---------------------------------------------------------
+
+const userSelect = `SELECT id, email, password_hash, created_at, created_by, last_login_at, disabled_at FROM pgmanager.users`
+
+func (s *PostgresStore) CreateUser(ctx context.Context, u *User) error {
+	var id int64
+	var createdAt time.Time
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO pgmanager.users (email, password_hash, created_by)
+		 VALUES ($1, $2, $3) RETURNING id, created_at`,
+		u.Email, u.PasswordHash, u.CreatedBy,
+	).Scan(&id, &createdAt)
+	if err != nil {
+		return fmt.Errorf("create user: %w", err)
+	}
+	u.ID = id
+	u.CreatedAt = createdAt
+	return nil
+}
+
+func (s *PostgresStore) GetUserByEmail(ctx context.Context, email string) (*User, error) {
+	var u User
+	var createdBy *string
+	err := s.pool.QueryRow(ctx, userSelect+" WHERE email = $1", email).Scan(
+		&u.ID, &u.Email, &u.PasswordHash, &u.CreatedAt, &createdBy, &u.LastLoginAt, &u.DisabledAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get user: %w", err)
+	}
+	u.CreatedBy = derefString(createdBy)
+	return &u, nil
+}
+
+func (s *PostgresStore) ListUsers(ctx context.Context) ([]User, error) {
+	rows, err := s.pool.Query(ctx, userSelect+" ORDER BY email")
+	if err != nil {
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+	defer rows.Close()
+
+	var out []User
+	for rows.Next() {
+		var u User
+		var createdBy *string
+		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.CreatedAt,
+			&createdBy, &u.LastLoginAt, &u.DisabledAt); err != nil {
+			return nil, fmt.Errorf("scan user: %w", err)
+		}
+		u.CreatedBy = derefString(createdBy)
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) SetUserPassword(ctx context.Context, email, passwordHash string) error {
+	result, err := s.pool.Exec(ctx,
+		`UPDATE pgmanager.users SET password_hash = $1 WHERE email = $2`, passwordHash, email)
+	if err != nil {
+		return fmt.Errorf("set password: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("user not found: %s", email)
+	}
+	// A password change must not leave old browsers signed in.
+	if _, err := s.pool.Exec(ctx,
+		`DELETE FROM pgmanager.sessions WHERE user_id = (SELECT id FROM pgmanager.users WHERE email = $1)`,
+		email); err != nil {
+		return fmt.Errorf("clear sessions: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteUser(ctx context.Context, email string) error {
+	// Sessions cascade on delete, so access dies with the row.
+	result, err := s.pool.Exec(ctx, `DELETE FROM pgmanager.users WHERE email = $1`, email)
+	if err != nil {
+		return fmt.Errorf("delete user: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("user not found: %s", email)
+	}
+	return nil
+}
+
+func (s *PostgresStore) TouchUserLogin(ctx context.Context, id int64, when time.Time) error {
+	_, err := s.pool.Exec(ctx, `UPDATE pgmanager.users SET last_login_at = $1 WHERE id = $2`, when, id)
+	return err
+}
+
+func (s *PostgresStore) CountUsers(ctx context.Context) (int, error) {
+	var n int
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM pgmanager.users`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count users: %w", err)
+	}
+	return n, nil
+}
+
+// --- Session operations ------------------------------------------------------
+
+func (s *PostgresStore) CreateSession(ctx context.Context, sess *Session) error {
+	var id int64
+	var createdAt time.Time
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO pgmanager.sessions (token_hash, user_id, expires_at, created_ip)
+		 VALUES ($1, $2, $3, $4) RETURNING id, created_at`,
+		sess.TokenHash, sess.UserID, sess.ExpiresAt, sess.CreatedIP,
+	).Scan(&id, &createdAt)
+	if err != nil {
+		return fmt.Errorf("create session: %w", err)
+	}
+	sess.ID = id
+	sess.CreatedAt = createdAt
+	return nil
+}
+
+func (s *PostgresStore) GetSessionByHash(ctx context.Context, hash []byte) (*Session, error) {
+	var sess Session
+	var createdIP *string
+	// Joined so the caller gets the identity in one round trip, and so a
+	// session for a deleted user simply doesn't resolve.
+	err := s.pool.QueryRow(ctx,
+		`SELECT s.id, s.token_hash, s.user_id, u.email, s.created_at, s.expires_at, s.last_seen_at, s.created_ip
+		 FROM pgmanager.sessions s
+		 JOIN pgmanager.users u ON u.id = s.user_id
+		 WHERE s.token_hash = $1 AND u.disabled_at IS NULL`, hash,
+	).Scan(&sess.ID, &sess.TokenHash, &sess.UserID, &sess.Email,
+		&sess.CreatedAt, &sess.ExpiresAt, &sess.LastSeenAt, &createdIP)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get session: %w", err)
+	}
+	sess.CreatedIP = derefString(createdIP)
+
+	// Best-effort activity stamp; never fail a request over it.
+	_, _ = s.pool.Exec(ctx, `UPDATE pgmanager.sessions SET last_seen_at = NOW() WHERE id = $1`, sess.ID)
+	return &sess, nil
+}
+
+func (s *PostgresStore) DeleteSession(ctx context.Context, hash []byte) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM pgmanager.sessions WHERE token_hash = $1`, hash)
+	return err
+}
+
+func (s *PostgresStore) DeleteExpiredSessions(ctx context.Context) (int, error) {
+	result, err := s.pool.Exec(ctx, `DELETE FROM pgmanager.sessions WHERE expires_at < NOW()`)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired sessions: %w", err)
+	}
+	return int(result.RowsAffected()), nil
 }

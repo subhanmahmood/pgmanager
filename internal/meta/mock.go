@@ -15,10 +15,14 @@ type MockStore struct {
 	databases map[int64]*Database
 	tokens    map[int64]*Token
 	devices   map[int64]*DeviceRequest
+	users     map[int64]*User
+	sessions  map[int64]*Session
 	nextPID   int64
 	nextDBID  int64
 	nextTID   int64
 	nextDevID int64
+	nextUID   int64
+	nextSID   int64
 }
 
 // NewMockStore creates a new mock store for testing.
@@ -28,10 +32,14 @@ func NewMockStore() *MockStore {
 		databases: make(map[int64]*Database),
 		tokens:    make(map[int64]*Token),
 		devices:   make(map[int64]*DeviceRequest),
+		users:     make(map[int64]*User),
+		sessions:  make(map[int64]*Session),
 		nextPID:   1,
 		nextDBID:  1,
 		nextTID:   1,
 		nextDevID: 1,
+		nextUID:   1,
+		nextSID:   1,
 	}
 }
 
@@ -423,4 +431,157 @@ func (s *MockStore) HasActiveAdminToken(ctx context.Context) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// --- User operations ---------------------------------------------------------
+
+func (s *MockStore) CreateUser(ctx context.Context, u *User) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.users {
+		if existing.Email == u.Email {
+			return fmt.Errorf("user already exists: %s", u.Email)
+		}
+	}
+	u.ID = s.nextUID
+	if u.CreatedAt.IsZero() {
+		u.CreatedAt = time.Now()
+	}
+	stored := *u
+	s.users[u.ID] = &stored
+	s.nextUID++
+	return nil
+}
+
+func (s *MockStore) GetUserByEmail(ctx context.Context, email string) (*User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, u := range s.users {
+		if u.Email == email {
+			out := *u
+			return &out, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *MockStore) ListUsers(ctx context.Context) ([]User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]User, 0, len(s.users))
+	for _, u := range s.users {
+		out = append(out, *u)
+	}
+	return out, nil
+}
+
+func (s *MockStore) SetUserPassword(ctx context.Context, email, passwordHash string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, u := range s.users {
+		if u.Email == email {
+			u.PasswordHash = passwordHash
+			// Changing a password signs out every existing browser.
+			for id, sess := range s.sessions {
+				if sess.UserID == u.ID {
+					delete(s.sessions, id)
+				}
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("user not found: %s", email)
+}
+
+func (s *MockStore) DeleteUser(ctx context.Context, email string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, u := range s.users {
+		if u.Email == email {
+			delete(s.users, id)
+			for sid, sess := range s.sessions {
+				if sess.UserID == id {
+					delete(s.sessions, sid)
+				}
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("user not found: %s", email)
+}
+
+func (s *MockStore) TouchUserLogin(ctx context.Context, id int64, when time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if u, ok := s.users[id]; ok {
+		u.LastLoginAt = &when
+	}
+	return nil
+}
+
+func (s *MockStore) CountUsers(ctx context.Context) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.users), nil
+}
+
+// --- Session operations ------------------------------------------------------
+
+func (s *MockStore) CreateSession(ctx context.Context, sess *Session) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess.ID = s.nextSID
+	if sess.CreatedAt.IsZero() {
+		sess.CreatedAt = time.Now()
+	}
+	stored := *sess
+	s.sessions[sess.ID] = &stored
+	s.nextSID++
+	return nil
+}
+
+func (s *MockStore) GetSessionByHash(ctx context.Context, hash []byte) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sess := range s.sessions {
+		if !bytes.Equal(sess.TokenHash, hash) {
+			continue
+		}
+		u, ok := s.users[sess.UserID]
+		if !ok || !u.Active() {
+			return nil, nil
+		}
+		now := time.Now()
+		sess.LastSeenAt = &now
+		out := *sess
+		out.Email = u.Email
+		return &out, nil
+	}
+	return nil, nil
+}
+
+func (s *MockStore) DeleteSession(ctx context.Context, hash []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, sess := range s.sessions {
+		if bytes.Equal(sess.TokenHash, hash) {
+			delete(s.sessions, id)
+			return nil
+		}
+	}
+	return nil
+}
+
+func (s *MockStore) DeleteExpiredSessions(ctx context.Context) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	n := 0
+	for id, sess := range s.sessions {
+		if sess.Expired(now) {
+			delete(s.sessions, id)
+			n++
+		}
+	}
+	return n, nil
 }

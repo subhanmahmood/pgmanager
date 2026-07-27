@@ -32,6 +32,7 @@ type Server struct {
 	addr         string
 	router       *chi.Mux
 	socketRouter *chi.Mux
+	loginLimiter *LoginLimiter
 }
 
 // NewServer creates a new API server. The store is used for token lookup and
@@ -40,9 +41,15 @@ func NewServer(cfg *config.Config, mgr *project.Manager, store meta.Store, addr 
 	if addr == "" {
 		addr = cfg.API.BindAddress()
 	}
-	s := &Server{cfg: cfg, mgr: mgr, store: store, addr: addr}
-	s.router = s.buildRouter(s.authMiddleware)
-	s.socketRouter = s.buildRouter(s.localAuthMiddleware)
+	s := &Server{
+		cfg: cfg, mgr: mgr, store: store, addr: addr,
+		// Shared by both routers so the budget can't be doubled by switching
+		// transport. Five attempts per quarter hour is generous for a human
+		// and hopeless for a guessing loop.
+		loginLimiter: NewLoginLimiter(5, 15*time.Minute),
+	}
+	s.router = s.buildRouter(s.authMiddleware, false)
+	s.socketRouter = s.buildRouter(s.localAuthMiddleware, true)
 	return s
 }
 
@@ -50,7 +57,12 @@ func NewServer(cfg *config.Config, mgr *project.Manager, store meta.Store, addr 
 // middleware. The TCP listener gets bearer-token auth; the unix socket gets
 // peer-credential auth. The handlers themselves are identical — they only
 // ever read the principal back out of the request context.
-func (s *Server) buildRouter(authMW func(http.Handler) http.Handler) *chi.Mux {
+//
+// local additionally registers the user-management routes. Those exist only
+// on the socket, so the allowlist of humans who can sign in to the admin UI
+// can only be changed from the server itself: off-box the routes are absent
+// and answer 404, which no token can talk its way past.
+func (s *Server) buildRouter(authMW func(http.Handler) http.Handler, local bool) *chi.Mux {
 	r := chi.NewRouter()
 
 	r.Use(middleware.Recoverer)
@@ -80,6 +92,19 @@ func (s *Server) buildRouter(authMW func(http.Handler) http.Handler) *chi.Mux {
 		r.Get("/auth/tokens", s.listTokens)
 		r.Post("/auth/tokens", s.createToken)
 		r.Delete("/auth/tokens/{prefix}", s.revokeToken)
+
+		// Admin-UI sessions. Humans sign in here; machines keep using tokens.
+		r.Post("/auth/login", s.login)
+		r.Post("/auth/logout", s.logout)
+		r.Post("/auth/password", s.changePassword)
+
+		// The allowlist of humans, reachable only from the server itself.
+		if local {
+			r.Get("/users", s.listUsers)
+			r.Post("/users", s.createUser)
+			r.Post("/users/{email}/password", s.setUserPassword)
+			r.Delete("/users/{email}", s.deleteUser)
+		}
 
 		// Device authorization. The first two are reached before the caller
 		// has any credentials — see the bypass in authMiddleware.
@@ -169,8 +194,16 @@ func (s *Server) Start() error {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 
-	// Requests nobody ever completed are just noise; clear them at boot.
-	s.purgeExpiredDeviceRequests(context.Background())
+	// Rows nobody can use any more are just noise; clear them at boot.
+	s.purgeExpired(context.Background())
+
+	// The admin UI is unusable with an empty allowlist, and the only way to
+	// fill it is from this host — so say so here rather than letting someone
+	// discover it at a login form that rejects everything.
+	if n, err := s.store.CountUsers(context.Background()); err == nil && n == 0 {
+		log.Printf("No admin users configured — the web UI cannot be signed into.")
+		log.Printf("Run `pgmanager users add <email>` on this host to create one.")
+	}
 
 	srv := &http.Server{
 		Addr:         s.addr,

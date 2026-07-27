@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A small Go service + CLI for creating, listing, and deleting PostgreSQL databases per project.
 
+Two kinds of caller, deliberately kept apart: **humans get sessions, machines get tokens.** A person signs in to the admin UI with an allowlisted email and password; a CLI or CI job holds a scoped bearer token, which a person mints for it.
+
 `pgmanager serve` is the only thing that ever holds Postgres credentials. Every client reaches it over HTTP, in one of two ways:
 
 1. **Remote (laptops + CI)** — HTTPS to a `pgmanager serve` on a VPS, with a scoped bearer token.
@@ -139,6 +141,8 @@ api:
   # created mode 0660. Empty = disabled.
   socket: ""
   socket_group: ""        # optional group to own the socket
+  # session_ttl — how long an admin-UI sign-in lasts. Zero = 14 days.
+  session_ttl: 0
 crypto:
   key: ""                 # base64, 32 bytes — `pgmanager keygen` to create one
   # key_file: /run/secrets/pgmanager_key  # alternative
@@ -185,6 +189,7 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 - `PGMANAGER_WEB_DIR` — directory for the static admin UI (`-` disables it).
 - `PGMANAGER_SOCKET` — server: local admin socket path. Client: where to look for one (`-` disables the probe).
 - `PGMANAGER_SOCKET_GROUP` — group that owns the admin socket.
+- `PGMANAGER_SESSION_TTL` — how long an admin-UI sign-in lasts (Go duration; default `336h`).
 - `PGMANAGER_ENCRYPTION_KEY` — base64 32-byte key for at-rest encryption.
 - `PGMANAGER_DATA_DIR` — where the bootstrap-token file is written.
 - `PGMANAGER_BOOTSTRAP_TOKEN` — operator-supplied initial admin token (skip auto-generation).
@@ -203,6 +208,10 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 - `internal/meta/store.go` — Store interface; `mock.go` is the in-memory implementation used in tests.
 - `internal/api/` — HTTP server, auth middleware, scoped-token enforcement, audit log. `setupRoutes` builds the route table twice: once behind bearer-token auth (TCP) and once behind `localAuthMiddleware` (the unix socket, where opening the socket *is* the authorization and the caller gets `admin`). Handlers are shared; they only read the principal out of the request context.
 - `internal/auth/token.go` — token generation, SHA-256 hashing, scope grammar and authorization.
+- `internal/auth/password.go` — argon2id hashing for admin-UI users (PHC-encoded, so parameters can be raised without invalidating existing hashes), plus email normalization/validation and the dummy hash that keeps unknown-address logins as expensive as real ones.
+- `internal/auth/session.go` — session cookie name, default TTL, and session-token generation (32 random bytes; only the SHA-256 is stored).
+- `internal/api/session_handlers.go` — `login` / `logout` / `changePassword`. The cookie is `HttpOnly`, `SameSite=Lax` (that is the CSRF defence — no separate token) and `Secure` whenever the request arrived over TLS.
+- `internal/api/users_handlers.go` — the email allowlist. **Registered only on the socket router**, so off-box these routes 404 and no token can add a user remotely. That structural restriction is the root of trust for UI access.
 - `internal/auth/device.go` — device-authorization codes: the secret `device_code` the CLI polls with, and the short human-typed `user_code` (`XXXX-XXXX`, ambiguous characters excluded).
 - `internal/api/device_handlers.go` — the RFC 8628-shaped device flow. `POST /api/auth/device` and `POST /api/auth/device/token` are unauthenticated by design (see `anonymousPaths` in `auth.go`); listing/approving/denying requires the `token` scope.
 - `internal/crypto/aesgcm.go` — AES-256-GCM for at-rest secrets.
@@ -220,6 +229,7 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 - Token format: `pgm_live_<32 url-safe bytes>`. Only SHA-256 stored. Display prefix is the first 16 chars.
 - SQL injection prevention everywhere via `pgx.Identifier{}.Sanitize()` and `quoteLiteral` for passwords.
 - DB passwords in metadata are AES-GCM encrypted; the key never lives in the DB.
+- Admin UI identity: `pgmanager.users` is an allowlist of emails, writable only over the local socket. Every allowlisted human is admin — being in a table only the server can write *is* the authorization. Sessions live in `pgmanager.sessions` (SHA-256 of the cookie value; rows cascade on user delete, so removing a person ends their access immediately). Changing or resetting a password drops that user's sessions. Login is throttled by `LoginLimiter` (5 attempts / 15 min, per IP *and* per email) because argon2 is expensive enough to be a DoS lever as well as a guessing target.
 - Device authorization: codes live in `pgmanager.device_requests`, expire after 10 minutes, and yield their token exactly once (`ConsumeDeviceToken` reads and clears in a single statement). The issued plaintext is AES-GCM encrypted while it waits to be collected — it is the one secret the server has to hand back in the clear.
 
 ### Scope grammar

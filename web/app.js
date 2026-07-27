@@ -7,10 +7,11 @@
 // everything is wired up through delegated listeners below.
 
 const API = '/api';
-const TOKEN_KEY = 'pgmanager_token';
 
 const state = {
-  token: localStorage.getItem(TOKEN_KEY) || '',
+  // No credential lives here: the session is an HttpOnly cookie the browser
+  // attaches itself, which is why script can neither read nor leak it.
+  session: null,
   whoami: null,
   projects: [],
   // project name -> array of databases, populated lazily on expand.
@@ -73,7 +74,6 @@ class ApiError extends Error {
 
 async function api(method, path, body) {
   const headers = {};
-  if (state.token) headers['Authorization'] = `Bearer ${state.token}`;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
 
   let res;
@@ -81,6 +81,7 @@ async function api(method, path, body) {
     res = await fetch(API + path, {
       method,
       headers,
+      credentials: 'same-origin',
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
@@ -102,8 +103,9 @@ async function api(method, path, body) {
   return data;
 }
 
-// Any 401/403 mid-session means the token was revoked or expired underneath
-// us; drop it and go back to the login gate rather than showing empty views.
+// Any 401/403 mid-session means the session expired or the account was
+// removed underneath us; go back to the login gate rather than showing
+// empty views.
 function handle(err) {
   if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
     signOut('Session expired — sign in again.');
@@ -447,10 +449,16 @@ async function showView(name) {
 function renderWhoami() {
   const dl = $('whoamiDetail');
   const who = state.whoami || { token_prefix: '—', scopes: [] };
-  dl.replaceChildren(
-    el('dt', { text: 'Token' }), el('dd', { text: who.token_prefix }),
-    el('dt', { text: 'Scopes' }), el('dd', { text: (who.scopes || []).join('\n') || 'none' }),
-  );
+  const rows = [
+    el('dt', { text: who.email ? 'Signed in as' : 'Token' }),
+    el('dd', { text: who.email || who.token_prefix }),
+    el('dt', { text: 'Scopes' }),
+    el('dd', { text: (who.scopes || []).join('\n') || 'none' }),
+  ];
+  if (state.session && state.session.expires_at) {
+    rows.push(el('dt', { text: 'Session ends' }), el('dd', { text: fmtDate(state.session.expires_at) }));
+  }
+  dl.replaceChildren(...rows);
 }
 
 /* ---------------------------------------------------------------- health */
@@ -470,16 +478,15 @@ async function checkHealth() {
 
 /* ------------------------------------------------------------ auth flow */
 
-async function signIn(token) {
-  state.token = token;
-  // whoami is the cheapest authenticated endpoint, and every valid token can
-  // call it regardless of scope — so it is the right probe for "is this good?"
+// enterApp is called once the session cookie is known good.
+async function enterApp() {
+  // whoami is the cheapest authenticated endpoint and every principal can
+  // call it — so it is the right probe for "is this session good?"
   state.whoami = await api('GET', '/auth/whoami');
-  localStorage.setItem(TOKEN_KEY, token);
 
   $('login').hidden = true;
   $('app').hidden = false;
-  $('whoamiPrefix').textContent = state.whoami.token_prefix;
+  $('whoamiPrefix').textContent = state.whoami.email || state.whoami.token_prefix;
 
   checkHealth();
   await showView(initialView());
@@ -510,19 +517,21 @@ function initialView() {
   return location.hash.slice(1) || 'projects';
 }
 
+// signOut clears local state and shows the gate. The server-side session is
+// dropped separately by `logout` — this is also the path taken when the
+// session has already stopped working, where there is nothing to drop.
 function signOut(message) {
-  state.token = '';
+  state.session = null;
   state.whoami = null;
   state.projects = [];
   state.databases = {};
   state.expanded.clear();
   state.tokens = [];
   state.devices = [];
-  localStorage.removeItem(TOKEN_KEY);
 
   $('app').hidden = true;
   $('login').hidden = false;
-  $('loginToken').value = '';
+  $('loginPassword').value = '';
   const err = $('loginError');
   if (message) {
     err.textContent = message;
@@ -534,27 +543,52 @@ function signOut(message) {
 
 $('loginForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const token = $('loginToken').value.trim();
+  const email = $('loginEmail').value.trim();
+  const password = $('loginPassword').value;
   $('loginError').hidden = true;
-  if (!token) {
-    showError('loginError', new Error('A token is required.'));
+  if (!email || !password) {
+    showError('loginError', new Error('Email and password are required.'));
     return;
   }
   const submit = $('loginSubmit');
   submit.disabled = true;
   try {
-    await signIn(token);
+    state.session = await api('POST', '/auth/login', { email, password });
+    $('loginPassword').value = '';
+    await enterApp();
   } catch (err) {
-    state.token = '';
-    showError('loginError', err.status === 401 || err.status === 403
-      ? new Error('That token was rejected.')
-      : err);
+    // The server gives one message for wrong password, unknown address and
+    // disabled account, on purpose — don't embellish it here.
+    showError('loginError', err);
   } finally {
     submit.disabled = false;
   }
 });
 
-$('logout').addEventListener('click', () => signOut());
+$('logout').addEventListener('click', async () => {
+  try {
+    await api('POST', '/auth/logout');
+  } catch { /* the session may already be gone; the gate is the point */ }
+  signOut();
+});
+
+$('formPassword').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('pwError').hidden = true;
+  const current = $('pwCurrent').value;
+  const next = $('pwNew').value;
+  if (!current || !next) {
+    showError('pwError', new Error('Both fields are required.'));
+    return;
+  }
+  try {
+    await api('POST', '/auth/password', { current, new: next });
+    // The server drops every session on change, including this one.
+    signOut('Password changed — sign in again.');
+  } catch (err) {
+    showError('pwError', err);
+  }
+});
 
 /* ----------------------------------------------------------------- forms */
 
@@ -829,15 +863,11 @@ window.addEventListener('hashchange', () => {
 (async function boot() {
   setInterval(checkHealth, 30000);
 
-  if (!state.token) {
-    signOut();
-    return;
-  }
+  // The cookie is HttpOnly, so the only way to know whether we are signed in
+  // is to ask. A 401 here is the normal first-visit case, not an error.
   try {
-    await signIn(state.token);
+    await enterApp();
   } catch (err) {
-    // A stored token that no longer works should not strand the user on a
-    // blank screen — fall back to the login gate.
-    signOut(err.status === 401 || err.status === 403 ? 'Stored token is no longer valid.' : err.message);
+    signOut(err.status === 401 || err.status === 403 ? '' : err.message);
   }
 })();

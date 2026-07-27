@@ -112,6 +112,29 @@ admin UI the first time.
 
 Full walkthrough — including TLS, secrets, and the `upgrade.sh` workflow — in [`examples/deploy/README.md`](examples/deploy/README.md).
 
+## Managing admin users
+
+Who may sign in to the UI is an allowlist of email addresses, and it is editable
+**only from the server itself** — those API routes exist only on the local
+socket, so off-box they return 404. No token, however privileged or however
+leaked, can add a user remotely.
+
+```bash
+pgmanager users add subhan@example.com          # prints a generated password once
+pgmanager users add ci@example.com --password-stdin
+pgmanager users list
+pgmanager users set-password subhan@example.com # the forgot-password path
+pgmanager users remove ci@example.com           # their sessions die with them
+```
+
+Passwords are hashed with argon2id and never stored or logged in the clear.
+Recovery is deliberately an operator action on the box, which is why pgmanager
+needs no outbound email. Users can change their own password from the UI;
+doing so signs out every browser, as does an operator reset.
+
+Humans get sessions, machines get tokens: `pgmanager users` never issues a
+bearer token, and `pgmanager auth create-token` never creates a login.
+
 ## Admin from the server itself
 
 Set `api.socket` (`PGMANAGER_SOCKET`) and `pgmanager serve` also listens on a
@@ -143,15 +166,17 @@ The bundled Deployment serves it on `admin.<your API domain>` (override with
 certificate on first request; both hostnames reach the same process, so the UI
 calls the API same-origin and needs no CORS configuration.
 
+Sign in with an email address and password. Accounts come from an allowlist
+that can only be edited on the server (see below), and the session is an
+`HttpOnly` cookie — no token is ever pasted into a browser, and script on the
+page cannot read the credential.
+
 The Devices view is where you approve `pgmanager login` requests: enter the
 one-time code (or follow the `/device?code=…` link the CLI prints), see what is
 asking and from where, then choose the name, scopes and expiry of the token it
 receives. Requested scopes are only a suggestion — what you pick is what it gets.
-
-Sign in by pasting an API token. It is kept in that browser's `localStorage`
-and sent as a bearer token — so it is exactly as privileged as the token you
-paste. Prefer a `project:<name>` token over `admin` where the person only needs
-one project, and revoke it from the Tokens view when they're done.
+Tokens you mint this way are attributed to you by email, so the audit log names
+a person rather than another token.
 
 Set `PGMANAGER_WEB_DIR` (or `api.web_dir`) to serve the UI from elsewhere, or to
 `-` to run API-only.
@@ -167,6 +192,8 @@ pgmanager auth whoami              Show current token + scopes
 pgmanager auth list-tokens         Enumerate tokens (admin/tokens scope)
 pgmanager auth create-token        Mint a scoped token
 pgmanager auth revoke-token <pfx>  Revoke a token by its prefix
+pgmanager users add|list|remove|set-password
+                                   Manage admin UI users (server-side only)
 pgmanager auth devices             List devices awaiting authorization
 pgmanager auth approve <code>      Approve a device and mint its token
 pgmanager auth deny <code>         Reject a device
@@ -214,6 +241,7 @@ The most important environment overrides:
 | `POSTGRES_PUBLIC_HOST` / `POSTGRES_PUBLIC_PORT` | server | What clients see in `db create` / `db info` responses |
 | `PGMANAGER_LISTEN` | server | Bind address (default `127.0.0.1:8080`) |
 | `PGMANAGER_SOCKET` | both | server: local admin socket path. client: where to look for one (`-` disables) |
+| `PGMANAGER_SESSION_TTL` | server | How long an admin-UI sign-in lasts (default `336h`, i.e. 14 days) |
 | `PGMANAGER_SOCKET_GROUP` | server | Group that owns the admin socket |
 | `PGMANAGER_ENCRYPTION_KEY` | server | base64 32-byte at-rest encryption key |
 | `PGMANAGER_BOOTSTRAP_TOKEN` | server | Pre-seed initial admin token (skip auto-generation) |
@@ -226,7 +254,10 @@ Full reference in the agent skill ([`.claude/skills/pgmanager/SKILL.md`](.claude
 Same surface the CLI talks to. All endpoints under `/api`; everything requires
 `Authorization: Bearer pgm_live_...` except `/api/health` and the two
 device-authorization entry points (`POST /api/auth/device` and
-`POST /api/auth/device/token`), whose callers by definition have no token yet.
+`POST /api/auth/device/token`) and `POST /api/auth/login`, whose callers by
+definition have no credential yet. The admin UI authenticates with a session
+cookie instead of a bearer token; `/api/users*` is reachable only over the
+local socket.
 
 ```bash
 TOKEN=pgm_live_xxx

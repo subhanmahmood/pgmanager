@@ -7,14 +7,16 @@
     <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-    <!-- Login gate. Shown until a token in localStorage passes /auth/whoami. -->
+    <!-- Login gate. Shown until the session cookie passes /auth/whoami. -->
     <div id="login" class="login" hidden>
         <form class="login-card" id="loginForm">
             <h1>pgmanager</h1>
-            <p class="muted">Paste an API token to continue. It is stored in this
-            browser only and sent as a bearer token.</p>
-            <label for="loginToken">API token</label>
-            <input type="password" id="loginToken" placeholder="pgm_live_…" autocomplete="off" spellcheck="false">
+            <p class="muted">Sign in with your email address. Accounts are created
+            on the server with <code>pgmanager users add</code>.</p>
+            <label for="loginEmail">Email</label>
+            <input type="email" id="loginEmail" autocomplete="username" spellcheck="false">
+            <label for="loginPassword">Password</label>
+            <input type="password" id="loginPassword" autocomplete="current-password">
             <p class="form-error" id="loginError" hidden></p>
             <button type="submit" id="loginSubmit">Sign in</button>
         </form>
@@ -91,6 +93,21 @@
                 <div class="panel">
                     <h3>Session</h3>
                     <dl id="whoamiDetail"></dl>
+                </div>
+                <div class="panel">
+                    <h3>Change password</h3>
+                    <p class="muted">Changing it signs you out of every browser,
+                    including this one. Lost it entirely? An operator resets it on
+                    the server with <code>pgmanager users set-password</code>.</p>
+                    <form id="formPassword">
+                        <label for="pwCurrent">Current password</label>
+                        <input type="password" id="pwCurrent" autocomplete="current-password">
+                        <label for="pwNew">New password</label>
+                        <input type="password" id="pwNew" autocomplete="new-password">
+                        <p class="hint">At least 12 characters.</p>
+                        <p class="form-error" id="pwError" hidden></p>
+                        <button type="submit">Change password</button>
+                    </form>
                 </div>
             </section>
         </main>
