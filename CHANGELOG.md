@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/subhanmahmood/pgmanager/compare/v0.2.0...v0.2.1) (2026-07-27)
+
+
+### Features
+
+* **auth:** sign in to the admin UI with an email and password ([#26](https://github.com/subhanmahmood/pgmanager/issues/26)) ([b3aed50](https://github.com/subhanmahmood/pgmanager/commit/b3aed5027cf1698c1517a70e2ea75edf70b7c7f6))
+
 ## [0.2.0](https://github.com/subhanmahmood/pgmanager/compare/v0.1.7...v0.2.0) (2026-07-27)
 
 
