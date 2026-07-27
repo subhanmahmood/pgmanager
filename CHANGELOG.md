@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.0](https://github.com/subhanmahmood/pgmanager/compare/v0.1.7...v0.2.0) (2026-07-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **auth:** credentials.yaml profiles with `postgres:`/`crypto:` blocks no longer work. Use `pgmanager login <api-url>` for a remote server, or run `pgmanager serve` with `api.socket` set and let the CLI find it.
+
+### Features
+
+* **auth:** device-code login, local admin socket, and removal of the direct-Postgres client ([#24](https://github.com/subhanmahmood/pgmanager/issues/24)) ([2dc159a](https://github.com/subhanmahmood/pgmanager/commit/2dc159a7052344f132d0a936e5a752caa97afc54))
+
 ## [0.1.7](https://github.com/subhanmahmood/pgmanager/compare/v0.1.6...v0.1.7) (2026-07-25)
 
 
