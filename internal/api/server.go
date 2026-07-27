@@ -32,6 +32,7 @@ type Server struct {
 	addr         string
 	router       *chi.Mux
 	socketRouter *chi.Mux
+	loginLimiter *LoginLimiter
 }
 
 // NewServer creates a new API server. The store is used for token lookup and
@@ -40,7 +41,13 @@ func NewServer(cfg *config.Config, mgr *project.Manager, store meta.Store, addr 
 	if addr == "" {
 		addr = cfg.API.BindAddress()
 	}
-	s := &Server{cfg: cfg, mgr: mgr, store: store, addr: addr}
+	s := &Server{
+		cfg: cfg, mgr: mgr, store: store, addr: addr,
+		// Shared by both routers so the budget can't be doubled by switching
+		// transport. Five attempts per quarter hour is generous for a human
+		// and hopeless for a guessing loop.
+		loginLimiter: NewLoginLimiter(5, 15*time.Minute),
+	}
 	s.router = s.buildRouter(s.authMiddleware)
 	s.socketRouter = s.buildRouter(s.localAuthMiddleware)
 	return s
@@ -50,6 +57,10 @@ func NewServer(cfg *config.Config, mgr *project.Manager, store meta.Store, addr 
 // middleware. The TCP listener gets bearer-token auth; the unix socket gets
 // peer-credential auth. The handlers themselves are identical — they only
 // ever read the principal back out of the request context.
+//
+// Note there are no user-management routes on either router: the allowlist of
+// humans who can sign in is edited by `pgmanager users` against the database
+// directly, so it has no HTTP surface at all to attack or to lock you out of.
 func (s *Server) buildRouter(authMW func(http.Handler) http.Handler) *chi.Mux {
 	r := chi.NewRouter()
 
@@ -80,6 +91,11 @@ func (s *Server) buildRouter(authMW func(http.Handler) http.Handler) *chi.Mux {
 		r.Get("/auth/tokens", s.listTokens)
 		r.Post("/auth/tokens", s.createToken)
 		r.Delete("/auth/tokens/{prefix}", s.revokeToken)
+
+		// Admin-UI sessions. Humans sign in here; machines keep using tokens.
+		r.Post("/auth/login", s.login)
+		r.Post("/auth/logout", s.logout)
+		r.Post("/auth/password", s.changePassword)
 
 		// Device authorization. The first two are reached before the caller
 		// has any credentials — see the bypass in authMiddleware.
@@ -169,8 +185,17 @@ func (s *Server) Start() error {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 
-	// Requests nobody ever completed are just noise; clear them at boot.
-	s.purgeExpiredDeviceRequests(context.Background())
+	// Rows nobody can use any more are just noise; clear them at boot.
+	s.purgeExpired(context.Background())
+
+	// The admin UI is unusable with an empty allowlist, and the only way to
+	// fill it is from this host — so say so here rather than letting someone
+	// discover it at a login form that rejects everything.
+	if n, err := s.store.CountUsers(context.Background()); err == nil && n == 0 {
+		log.Printf("No admin users configured — the web UI cannot be signed into.")
+		log.Printf("Run `pgmanager users add <email>` on this host to create one.")
+		log.Printf("(It talks to Postgres directly using this config, so it works whether or not the admin socket is enabled.)")
+	}
 
 	srv := &http.Server{
 		Addr:         s.addr,

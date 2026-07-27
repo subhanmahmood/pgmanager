@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -86,6 +87,7 @@ func newRootCmd() *cobra.Command {
 		newLogoutCmd(),
 		newProfileCmd(),
 		newAuthCmd(),
+		newUsersCmd(),
 		newDoctorCmd(),
 		newKeygenCmd(),
 		newUpdateCmd(),
@@ -951,6 +953,224 @@ func newAuthCmd() *cobra.Command {
 	})
 
 	return cmd
+}
+
+// --- users ------------------------------------------------------------------
+
+// newUsersCmd manages the allowlist of humans who can sign in to the admin UI.
+//
+// These commands talk to Postgres directly using the *server* config, exactly
+// as `serve` does — they are not API calls. That means user management has no
+// HTTP surface at all: it cannot be reached over the network by any token, and
+// equally it cannot be locked out by the API being down, the admin socket
+// being disabled, or the allowlist being empty. Provisioning the first account
+// is always possible from the box that holds pgmanager.yaml.
+func newUsersCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "users",
+		Short: "Manage admin UI users (run on the server)",
+		Long: "Manage the allowlist of people who can sign in to the admin UI.\n\n" +
+			"These commands read the server config (pgmanager.yaml) and edit the\n" +
+			"database directly, so they must run on the machine that hosts\n" +
+			"pgmanager \u2014 which is exactly the point: no API token can add a user.",
+	}
+
+	addCmd := &cobra.Command{
+		Use:   "add <email>",
+		Short: "Add a user and print a generated password once",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			email := auth.NormalizeEmail(args[0])
+			if !auth.ValidEmail(email) {
+				return fmt.Errorf("%q is not a valid email address", args[0])
+			}
+			password, generated, err := userPassword(cmd)
+			if err != nil {
+				return err
+			}
+			hash, err := auth.HashPassword(password)
+			if err != nil {
+				return err
+			}
+
+			store, err := openServerStore(ctx)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			user := &meta.User{Email: email, PasswordHash: hash, CreatedBy: localOperator()}
+			if err := store.CreateUser(ctx, user); err != nil {
+				return err
+			}
+			out := map[string]interface{}{"email": email}
+			if generated {
+				out["password"] = password
+			}
+			return emit(out, func() {
+				fmt.Printf("Added %s\n", email)
+				if generated {
+					printOnce(password)
+					fmt.Println("\nThey can change it from the admin UI after signing in.")
+				}
+			})
+		},
+	}
+	addCmd.Flags().Bool("password-stdin", false, "read the password from stdin instead of generating one")
+	cmd.AddCommand(addCmd)
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List admin UI users",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			store, err := openServerStore(ctx)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			users, err := store.ListUsers(ctx)
+			if err != nil {
+				return err
+			}
+			return emit(users, func() {
+				if len(users) == 0 {
+					fmt.Println("No users \u2014 the admin UI cannot be signed into.")
+					fmt.Println("Add one with: pgmanager users add <email>")
+					return
+				}
+				fmt.Printf("%-32s %-20s %s\n", "EMAIL", "ADDED", "LAST LOGIN")
+				fmt.Println(strings.Repeat("-", 74))
+				for _, u := range users {
+					last := "never"
+					if u.LastLoginAt != nil {
+						last = u.LastLoginAt.Format("2006-01-02 15:04")
+					}
+					fmt.Printf("%-32s %-20s %s\n", u.Email, u.CreatedAt.Format("2006-01-02 15:04"), last)
+				}
+			})
+		},
+	})
+
+	setPwCmd := &cobra.Command{
+		Use:   "set-password <email>",
+		Short: "Reset a user's password (this is the forgot-password path)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			email := auth.NormalizeEmail(args[0])
+			password, generated, err := userPassword(cmd)
+			if err != nil {
+				return err
+			}
+			hash, err := auth.HashPassword(password)
+			if err != nil {
+				return err
+			}
+
+			store, err := openServerStore(ctx)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			if err := store.SetUserPassword(ctx, email, hash); err != nil {
+				return err
+			}
+			out := map[string]interface{}{"email": email, "status": "password-reset"}
+			if generated {
+				out["password"] = password
+			}
+			return emit(out, func() {
+				fmt.Printf("Password reset for %s \u2014 existing sessions were signed out\n", email)
+				if generated {
+					printOnce(password)
+				}
+			})
+		},
+	}
+	setPwCmd.Flags().Bool("password-stdin", false, "read the new password from stdin instead of generating one")
+	cmd.AddCommand(setPwCmd)
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "remove <email>",
+		Short: "Remove a user and sign out their sessions",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			email := auth.NormalizeEmail(args[0])
+			store, err := openServerStore(ctx)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			if err := store.DeleteUser(ctx, email); err != nil {
+				return err
+			}
+			return emit(map[string]string{"status": "removed", "email": email}, func() {
+				fmt.Printf("Removed %s \u2014 their sessions are gone too\n", email)
+			})
+		},
+	})
+
+	return cmd
+}
+
+// openServerStore connects to Postgres using the server config, the same way
+// `serve` does. The encryption key is passed when available but is not
+// required: users and sessions store hashes, never anything encrypted, so
+// provisioning still works on a host where the key is not present.
+func openServerStore(ctx context.Context) (meta.Store, error) {
+	cfg, err := loadServerConfig()
+	if err != nil {
+		return nil, fmt.Errorf("%w\n\nRun this on the machine hosting pgmanager, or point at its config with --config", err)
+	}
+	key, _ := cfg.Crypto.EncryptionKey()
+	return meta.NewPostgresStore(ctx, cfg.Postgres.ConnectionString(), key)
+}
+
+// localOperator names whoever ran the command, for the created_by column.
+func localOperator() string {
+	name := os.Getenv("SUDO_USER")
+	if name == "" {
+		name = os.Getenv("USER")
+	}
+	if name == "" {
+		return "local"
+	}
+	host, _ := os.Hostname()
+	if host == "" {
+		return name
+	}
+	return name + "@" + host
+}
+
+func printOnce(password string) {
+	fmt.Println("\nPASSWORD (save this \u2014 it will not be shown again):")
+	fmt.Println("  " + password)
+}
+
+// userPassword returns the password to set and whether it was generated.
+// Generating by default avoids a terminal-echo dependency and matches how
+// tokens already work; --password-stdin is there for scripted provisioning.
+func userPassword(cmd *cobra.Command) (string, bool, error) {
+	fromStdin, _ := cmd.Flags().GetBool("password-stdin")
+	if !fromStdin {
+		p, err := auth.GeneratePassword()
+		return p, true, err
+	}
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return "", false, fmt.Errorf("read password from stdin: %w", err)
+	}
+	password := strings.TrimRight(line, "\r\n")
+	if len(password) < auth.MinPasswordLen {
+		return "", false, fmt.Errorf("password must be at least %d characters", auth.MinPasswordLen)
+	}
+	return password, false, nil
 }
 
 // --- doctor & keygen --------------------------------------------------------

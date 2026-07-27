@@ -405,7 +405,7 @@ func (s *Server) cleanup(w http.ResponseWriter, r *http.Request) {
 	}
 	// Lapsed device authorizations are dead weight too; sweep them here so
 	// the table doesn't grow forever between restarts.
-	s.purgeExpiredDeviceRequests(r.Context())
+	s.purgeExpired(r.Context())
 	writeJSON(w, http.StatusOK, CleanupResponse{
 		Deleted: deleted,
 		Count:   len(deleted),

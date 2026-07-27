@@ -54,7 +54,15 @@ docker compose exec pgmanager pgmanager auth whoami
 # scopes: admin
 ```
 
-The bootstrap token is only needed to sign into the browser admin UI:
+Create yourself an admin-UI account while you're here — the allowlist is only
+editable from this host:
+
+```bash
+docker compose exec pgmanager pgmanager users add you@example.com
+# prints a generated password once; change it from the UI after signing in
+```
+
+The bootstrap token is only needed for API clients that predate device login:
 
 ```bash
 docker compose exec pgmanager cat /var/lib/pgmanager/bootstrap-token.txt

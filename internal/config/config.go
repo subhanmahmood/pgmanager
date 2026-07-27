@@ -66,6 +66,10 @@ type APIConfig struct {
 	// SocketGroup optionally chowns the socket to this group, so operators
 	// can reach it without being root.
 	SocketGroup string `yaml:"socket_group"`
+
+	// SessionTTL is how long an admin-UI sign-in lasts. Zero means the
+	// default (14 days).
+	SessionTTL time.Duration `yaml:"session_ttl"`
 }
 
 type CleanupConfig struct {
@@ -184,6 +188,11 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if group := os.Getenv("PGMANAGER_SOCKET_GROUP"); group != "" {
 		cfg.API.SocketGroup = group
+	}
+	if ttl := os.Getenv("PGMANAGER_SESSION_TTL"); ttl != "" {
+		if d, err := time.ParseDuration(ttl); err == nil {
+			cfg.API.SessionTTL = d
+		}
 	}
 	if key := os.Getenv("PGMANAGER_ENCRYPTION_KEY"); key != "" {
 		cfg.Crypto.Key = key

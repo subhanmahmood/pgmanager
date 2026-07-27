@@ -317,15 +317,18 @@ func (s *Server) lookupUserCode(w http.ResponseWriter, r *http.Request) (*meta.D
 	return dr, true
 }
 
-// purgeExpiredDeviceRequests drops rows for requests nobody completed.
-func (s *Server) purgeExpiredDeviceRequests(ctx context.Context) {
-	n, err := s.store.DeleteExpiredDeviceRequests(ctx)
-	if err != nil {
+// purgeExpired drops rows nobody can use any more: device authorizations
+// that were never completed, and browser sessions past their deadline.
+func (s *Server) purgeExpired(ctx context.Context) {
+	if n, err := s.store.DeleteExpiredDeviceRequests(ctx); err != nil {
 		log.Printf("device: purge expired requests: %v", err)
-		return
-	}
-	if n > 0 {
+	} else if n > 0 {
 		log.Printf("device: purged %d expired authorization request(s)", n)
+	}
+	if n, err := s.store.DeleteExpiredSessions(ctx); err != nil {
+		log.Printf("session: purge expired sessions: %v", err)
+	} else if n > 0 {
+		log.Printf("session: purged %d expired session(s)", n)
 	}
 }
 

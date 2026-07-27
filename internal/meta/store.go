@@ -2,6 +2,7 @@ package meta
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -90,6 +91,45 @@ func (d *DeviceRequest) Expired(now time.Time) bool {
 	return !now.Before(d.ExpiresAt)
 }
 
+// User is a human who can sign in to the admin UI. The set of users is the
+// allowlist, and it is edited only by `pgmanager users` running on the server
+// against this store — there is no HTTP route that can change it.
+type User struct {
+	ID           int64
+	Email        string // stored lower-cased
+	PasswordHash string // PHC-format argon2id; never reversible
+	// PasswordChangedAt lets a session insert detect that the password moved
+	// under it — see Store.CreateSession.
+	PasswordChangedAt time.Time
+	CreatedAt         time.Time
+	CreatedBy         string
+	LastLoginAt       *time.Time
+	DisabledAt        *time.Time
+}
+
+// Active reports whether the user may sign in.
+func (u *User) Active() bool { return u.DisabledAt == nil }
+
+// Session is a signed-in browser. The cookie holds a secret whose SHA-256 is
+// stored here, so the table cannot be replayed as a login.
+type Session struct {
+	ID         int64
+	TokenHash  []byte
+	UserID     int64
+	Email      string // joined from users for convenience
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	LastSeenAt *time.Time
+	CreatedIP  string
+}
+
+// Expired reports whether the session is past its deadline.
+func (s *Session) Expired(now time.Time) bool { return !now.Before(s.ExpiresAt) }
+
+// ErrPasswordChanged is returned when a session insert loses a race with a
+// password change, so the credential it was authorized by is already stale.
+var ErrPasswordChanged = errors.New("password changed during sign-in")
+
 // Store defines the interface for metadata storage.
 type Store interface {
 	Close() error
@@ -133,4 +173,20 @@ type Store interface {
 	ConsumeDeviceToken(ctx context.Context, id int64) (string, error)
 	TouchDeviceRequest(ctx context.Context, id int64, when time.Time) error
 	DeleteExpiredDeviceRequests(ctx context.Context) (int, error)
+
+	// User operations. Reached only by `pgmanager users` on the server; no
+	// HTTP handler touches these.
+	CreateUser(ctx context.Context, u *User) error
+	GetUserByEmail(ctx context.Context, email string) (*User, error)
+	ListUsers(ctx context.Context) ([]User, error)
+	SetUserPassword(ctx context.Context, email, passwordHash string) error
+	DeleteUser(ctx context.Context, email string) error
+	TouchUserLogin(ctx context.Context, id int64, when time.Time) error
+	CountUsers(ctx context.Context) (int, error)
+
+	// Session operations.
+	CreateSession(ctx context.Context, s *Session, expectPasswordChangedAt time.Time) error
+	GetSessionByHash(ctx context.Context, hash []byte) (*Session, error)
+	DeleteSession(ctx context.Context, hash []byte) error
+	DeleteExpiredSessions(ctx context.Context) (int, error)
 }

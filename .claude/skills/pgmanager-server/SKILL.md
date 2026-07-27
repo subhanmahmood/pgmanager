@@ -245,6 +245,41 @@ handlers, scope checks and audit log; each line names the calling uid/pid, so
 Use `--socket <path>` to target one explicitly, or `PGMANAGER_SOCKET=-` to stop
 the CLI probing for one.
 
+## Use Case — Manage who can sign in to the admin UI
+
+The UI is gated by an allowlist of email addresses. `pgmanager users` edits it
+in the database directly using the server config — there is no API route for
+it, so no token can add a user remotely, and equally no amount of API or socket
+misconfiguration can stop you provisioning the first account.
+
+```bash
+docker compose exec pgmanager pgmanager users add subhan@example.com
+# Added subhan@example.com
+#
+# PASSWORD (save this — it will not be shown again):
+#   WxdGciKs8VMRWqL5JVom
+
+docker compose exec pgmanager pgmanager users list
+docker compose exec -T pgmanager pgmanager users add hasin@example.com --password-stdin < pw.txt
+```
+
+Passwords are argon2id-hashed; nothing stores or logs them in the clear.
+
+**Forgot a password?** There is no email delivery in pgmanager, by design —
+recovery is an operator action here:
+
+```bash
+docker compose exec pgmanager pgmanager users set-password subhan@example.com
+```
+
+That prints a new password and signs out every existing session for that user,
+which is what you want if the reason for the reset is that you no longer trust
+what is signed in. `pgmanager users remove <email>` does the same and takes the
+account with it.
+
+Users change their own password from the admin UI (Maintenance → Change
+password); doing so also signs out every browser.
+
 ## Use Case — Authorize a teammate's laptop
 
 They run `pgmanager login https://pgm.example.com` and read you the one-time
@@ -294,6 +329,11 @@ SELECT project, env, pr_number, created_at, expires_at FROM pgmanager.databases 
 -- purged at startup and on `pgmanager cleanup`.
 SELECT user_code, client_name, client_ip, status, approved_by, expires_at
   FROM pgmanager.device_requests ORDER BY created_at DESC LIMIT 20;
+-- Admin UI accounts and live browser sessions. password_hash is argon2id and
+-- is never reversible; sessions store only a hash of the cookie value.
+SELECT email, created_by, last_login_at, disabled_at FROM pgmanager.users ORDER BY email;
+SELECT u.email, s.created_ip, s.last_seen_at, s.expires_at
+  FROM pgmanager.sessions s JOIN pgmanager.users u ON u.id = s.user_id;
 SQL
 ```
 
@@ -325,6 +365,7 @@ api:
   allowed_origins: []     # CORS list; usually empty
   socket: ""              # local admin socket; opening it grants admin (mode 0660)
   socket_group: ""        # optional group to own the socket
+  session_ttl: 0          # admin-UI session lifetime; 0 = 14 days
 crypto:
   key: ""                 # 32-byte base64; or use key_file, or env
   # key_file: /run/secrets/pgmanager_key
@@ -346,6 +387,7 @@ cleanup:
 | `PGMANAGER_ALLOWED_ORIGINS` | Comma-separated CORS list |
 | `PGMANAGER_SOCKET` | Local admin socket path; callers are admin (client-side: where to look for one, `-` disables) |
 | `PGMANAGER_SOCKET_GROUP` | Group that owns the admin socket |
+| `PGMANAGER_SESSION_TTL` | How long an admin-UI sign-in lasts (default `336h`) |
 | `PGMANAGER_ENCRYPTION_KEY` | base64 32-byte at-rest encryption key |
 | `PGMANAGER_DATA_DIR` | Where `bootstrap-token.txt` is written |
 | `PGMANAGER_BOOTSTRAP_TOKEN` | Operator-supplied initial admin token (skip auto-generation) |
