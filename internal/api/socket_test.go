@@ -84,6 +84,29 @@ func TestSocketGrantsAdminWithoutToken(t *testing.T) {
 	}
 }
 
+// The unix dialer invents a Host header, so connection strings handed back
+// over the socket must come from config rather than from the request.
+func TestSocketDoesNotAdvertiseDialerHost(t *testing.T) {
+	fx := setupTestServer(t)
+	defer fx.cleanup()
+	fx.server.cfg.Postgres.Host = "db.internal"
+	fx.server.cfg.Postgres.Port = 5432
+
+	req := httptest.NewRequest("GET", "/api/health", nil)
+	req.Host = "pgmanager.local"
+	ctx := context.WithValue(req.Context(), peerCredKey{}, "local:uid=0,pid=1")
+
+	host, port := fx.server.publicHostPort(req.WithContext(ctx))
+	if host != "db.internal" || port != 5432 {
+		t.Fatalf("socket request advertised %s:%d, want db.internal:5432", host, port)
+	}
+
+	// A TCP request still prefers its Host header, as before.
+	if host, _ := fx.server.publicHostPort(req); host != "pgmanager.local" {
+		t.Fatalf("TCP request advertised %q, want the Host header", host)
+	}
+}
+
 func TestSocketDisabledByDefault(t *testing.T) {
 	fx := setupTestServer(t)
 	defer fx.cleanup()

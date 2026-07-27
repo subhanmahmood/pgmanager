@@ -19,18 +19,23 @@ For VPS operator tasks — deploying, upgrading the Server image, swapping the P
 
 ## Architecture (read first)
 
-There are **two modes** the CLI can run in. Pick by where you're standing:
+`pgmanager serve` is the only thing that ever holds Postgres credentials. The
+CLI always talks to it over HTTP — there is **no** direct-Postgres client mode.
+Two ways to reach it, chosen by where you're standing:
 
 | Mode | When to use | Caller holds |
 |------|-------------|--------------|
-| **API mode** | Laptops, CI, anywhere that isn't the VPS itself | Just `(api_url, scoped_token)` |
-| **Local mode** | A dev machine running its own Postgres | Direct Postgres credentials + encryption key |
+| **API** | Laptops, CI, anywhere that isn't the server itself | Just `(api_url, scoped_token)` |
+| **Socket** | On the box running `serve` | Nothing — permission to open the socket *is* the authorization |
 
-**Default to API mode.** Postgres credentials should only live on the VPS. Issue scoped tokens to laptops/CI.
+Both run through the same handlers, so every request is scope-checked and
+recorded in the audit log.
 
 ```
 Laptop ──HTTPS+token──► Caddy ─► pgmanager serve ─► Postgres (localhost on VPS)
                        (443)        (127.0.0.1:8080)         (never exposed)
+                                          ▲
+On the VPS: pgmanager ──unix socket───────┘  (no token; file permissions gate it)
 ```
 
 ## Installation
@@ -48,7 +53,7 @@ Self-update later with `pgmanager update` (see below).
 
 ---
 
-## Use Case 1 — First-time laptop setup (API mode)
+## Use Case 1 — First-time laptop setup
 
 You have an API URL. You do **not** need a token in hand — `login` runs a device
 authorization, the same shape as `gh auth login`:
@@ -79,32 +84,29 @@ Profile is stored at `~/.config/pgmanager/credentials.yaml` (mode 0600). Token i
 
 ## Use Case 2 — Local development (no remote server)
 
-You have Postgres running locally and just want pgmanager as a CLI in front of it. No `serve`, no tokens.
+You have Postgres running locally and want pgmanager in front of it. Run your
+own `serve` with a socket; the CLI finds it with no profile and no token.
 
 ```bash
-mkdir -p ~/.config/pgmanager
-cat > ~/.config/pgmanager/credentials.yaml <<'EOF'
-current: local
-profiles:
-  local:
-    postgres:
-      host: localhost
-      port: 5432
-      user: postgres
-      password: postgres
-      ssl_mode: disable
-    crypto:
-      key: "PASTE_OUTPUT_OF_pgmanager_keygen_HERE"
-EOF
-chmod 600 ~/.config/pgmanager/credentials.yaml
+pgmanager init --mode=server        # writes pgmanager.yaml + a fresh crypto key
+$EDITOR pgmanager.yaml              # set postgres.password, and:
+#   api:
+#     socket: /tmp/pgmanager.sock
+#   postgres:
+#     ssl_mode: disable
 
-pgmanager keygen   # paste output into the file above
+pgmanager serve &                   # leave it running
 
-pgmanager project create myapp
-pgmanager db create myapp dev
+PGMANAGER_SOCKET=/tmp/pgmanager.sock pgmanager project create myapp
+PGMANAGER_SOCKET=/tmp/pgmanager.sock pgmanager db create myapp dev
 ```
 
-The `crypto.key` is required even in local mode — DB passwords are encrypted at rest in the metadata table.
+Export `PGMANAGER_SOCKET` in your shell profile, or set `api.socket` to the
+default `/run/pgmanager/pgmanager.sock` and drop the prefix entirely.
+
+There is no direct-Postgres client mode — it was removed because it bypassed
+scope checks and the audit log. Going through `serve` costs one background
+process and gets you the same authorization story as production.
 
 ---
 
@@ -404,7 +406,7 @@ pgmanager tui
 - `p` (on the database info view) — reveal password (fetches via `db credentials`)
 - `q` — quit
 
-Works in both API mode and local mode.
+Works over both transports (remote API and local socket).
 
 ---
 
@@ -483,16 +485,14 @@ profiles:
   staging:
     api_url: https://pgm-staging.example.com
     token: pgm_live_yyyyyyyyyyyyyyyy
-  local:
-    postgres:
-      host: localhost
-      port: 5432
-      user: postgres
-      password: postgres
-      ssl_mode: disable
-    crypto:
-      key: <base64 32-byte key>
+  server:
+    socket: /run/pgmanager/pgmanager.sock
 ```
+
+A profile sets either `api_url` (+ `token`) or `socket` — never Postgres
+credentials. On the server itself you usually need no profile at all: the CLI
+probes `$PGMANAGER_SOCKET` (default `/run/pgmanager/pgmanager.sock`) when no
+profile is configured.
 
 ### Client environment variables
 
@@ -501,6 +501,7 @@ profiles:
 | `PGMANAGER_API_URL` / `PGMANAGER_API_TOKEN` | Synthesize an `env` profile; bypasses the file (CI path) |
 | `PGMANAGER_PROFILE` | Pick a saved profile by name |
 | `PGMANAGER_CONFIG_DIR` / `XDG_CONFIG_HOME` | Override credentials.yaml location |
+| `PGMANAGER_SOCKET` | Local admin socket to use, when standing on the server (`-` disables the probe) |
 
 (Server-side env vars — `POSTGRES_*`, `PGMANAGER_LISTEN`, `PGMANAGER_ENCRYPTION_KEY`, etc. — are in the `pgmanager-server` skill.)
 

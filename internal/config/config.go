@@ -284,7 +284,7 @@ func (c *PostgresConfig) ConnectionString() string {
 
 // EffectiveHost returns the host that should be advertised to clients —
 // PublicHost if set, otherwise the server-side Host. Used by code paths that
-// have no inbound HTTP request to inspect (local mode, project.Manager).
+// have no inbound HTTP request to inspect (project.Manager internals).
 func (c *PostgresConfig) EffectiveHost() string {
 	if c.PublicHost != "" {
 		return c.PublicHost

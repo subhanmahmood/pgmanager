@@ -4,10 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What pgmanager is
 
-A small Go service + CLI for creating, listing, and deleting PostgreSQL databases per project. There are two ways to use it:
+A small Go service + CLI for creating, listing, and deleting PostgreSQL databases per project.
 
-1. **API mode (default for laptops + CI)** — talk to a remote `pgmanager serve` over HTTPS with a scoped bearer token. The remote VPS holds the Postgres credentials; clients only hold a token.
-2. **Local mode (for admin work and local dev)** — the CLI connects directly to Postgres. Used by `pgmanager serve` itself, and as an opt-in profile for local development.
+`pgmanager serve` is the only thing that ever holds Postgres credentials. Every client reaches it over HTTP, in one of two ways:
+
+1. **Remote (laptops + CI)** — HTTPS to a `pgmanager serve` on a VPS, with a scoped bearer token.
+2. **Local socket (admin work on the server itself)** — a unix socket that `serve` optionally listens on. Opening it *is* the authorization, so there is no token; see `api.socket`.
+
+Both go through the same handlers, so every request is scope-checked and audited. There is no direct-Postgres client path — it was removed because it bypassed both.
 
 All metadata (projects, databases, tokens) lives in a `pgmanager` schema inside the same Postgres server. DB passwords are AES-GCM encrypted at rest with an operator-supplied key.
 
@@ -23,7 +27,7 @@ curl -sSL https://raw.githubusercontent.com/subhanmahmood/pgmanager/master/insta
 
 Download the binary for your platform from [GitHub Releases](https://github.com/subhanmahmood/pgmanager/releases).
 
-## Quick start — laptop (API mode)
+## Quick start — laptop
 
 ```bash
 pgmanager login https://pgm.example.com
@@ -145,7 +149,7 @@ cleanup:
 
 ### `credentials.yaml` (client-side, used by every other command)
 
-Stored at `$XDG_CONFIG_HOME/pgmanager/credentials.yaml` (default `~/.config/pgmanager/credentials.yaml`), mode `0600`. Holds named profiles (a profile may also set `socket:` instead of `api_url`/`postgres`):
+Stored at `$XDG_CONFIG_HOME/pgmanager/credentials.yaml` (default `~/.config/pgmanager/credentials.yaml`), mode `0600`. A profile sets either `api_url` (+ `token`) or `socket`:
 
 ```yaml
 current: prod
@@ -153,16 +157,11 @@ profiles:
   prod:
     api_url: https://pgm.example.com
     token: pgm_live_xxxxxxxxxxxxxxxx
-  local:
-    postgres:
-      host: localhost
-      port: 5432
-      user: postgres
-      password: postgres
-      ssl_mode: disable
-    crypto:
-      key: base64+32bytes
+  server:
+    socket: /run/pgmanager/pgmanager.sock
 ```
+
+On the server you usually need no profile at all — the CLI probes for the socket by itself.
 
 Managed via `pgmanager login / logout / profile use / profile show`.
 
@@ -197,8 +196,8 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 ### Layer structure
 
 - `cmd/pgmanager/main.go` — Cobra CLI; resolves a profile, constructs a `client.Client`, and dispatches.
-- `internal/client/` — `Client` interface plus `HTTPClient` (talks to `pgmanager serve`) and `LocalClient` (wraps `project.Manager` for direct-Postgres).
-- `internal/project/project.go` — core business logic. The implementation behind every API handler and the local client.
+- `internal/client/` — `Client` interface plus its one implementation, `HTTPClient`. `NewHTTP` talks to a remote `pgmanager serve`; `NewUnix` dials a local admin socket. Pure transport: it imports no Postgres code at all.
+- `internal/project/project.go` — core business logic. The implementation behind every API handler.
 - `internal/db/postgres.go` — actual `CREATE DATABASE`/`CREATE USER`/`DROP …` operations via pgx.
 - `internal/meta/postgres.go` — metadata persistence (projects, databases, tokens). Encrypts/decrypts DB passwords using the key passed to `NewPostgresStore`. Idempotent schema migration.
 - `internal/meta/store.go` — Store interface; `mock.go` is the in-memory implementation used in tests.

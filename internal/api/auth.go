@@ -61,6 +61,13 @@ func withPeerCred(ctx context.Context, c net.Conn) context.Context {
 	return context.WithValue(ctx, peerCredKey{}, peerIdentity(c))
 }
 
+// isSocketRequest reports whether the request arrived over the local admin
+// socket. Only the socket listener installs a peer credential.
+func isSocketRequest(ctx context.Context) bool {
+	_, ok := ctx.Value(peerCredKey{}).(string)
+	return ok
+}
+
 func peerCredFromContext(ctx context.Context) string {
 	if v, ok := ctx.Value(peerCredKey{}).(string); ok && v != "" {
 		return v

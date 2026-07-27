@@ -20,29 +20,23 @@ type ClientConfig struct {
 	Profiles map[string]*Profile `yaml:"profiles"`
 }
 
-// Profile describes one connection target. Exactly one of APIURL (talk to a
-// remote `pgmanager serve`) or Postgres (talk directly to Postgres) should be
-// set. APIURL takes precedence if both happen to be present.
+// Profile describes one connection target: either APIURL (a remote
+// `pgmanager serve` over HTTPS) or Socket (a local one over a unix socket).
+// APIURL takes precedence if both happen to be present.
 type Profile struct {
-	APIURL   string          `yaml:"api_url,omitempty"`
-	Token    string          `yaml:"token,omitempty"`
-	Socket   string          `yaml:"socket,omitempty"`
-	Postgres *PostgresConfig `yaml:"postgres,omitempty"`
-	Crypto   *CryptoConfig   `yaml:"crypto,omitempty"`
+	APIURL string `yaml:"api_url,omitempty"`
+	Token  string `yaml:"token,omitempty"`
+	Socket string `yaml:"socket,omitempty"`
 }
 
-// Mode returns how the profile reaches pgmanager: "api" (remote HTTP),
-// "socket" (local unix socket on the server itself), or "local" (direct
-// Postgres connection).
+// Mode returns how the profile reaches pgmanager: "api" (remote HTTP) or
+// "socket" (local unix socket on the server itself).
 func (p *Profile) Mode() string {
 	if p.APIURL != "" {
 		return "api"
 	}
 	if p.Socket != "" {
 		return "socket"
-	}
-	if p.Postgres != nil {
-		return "local"
 	}
 	return ""
 }

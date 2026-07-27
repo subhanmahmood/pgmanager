@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -98,7 +97,11 @@ func newRootCmd() *cobra.Command {
 
 // getClient resolves the active profile and returns a configured client.
 // Callers must Close it.
-func getClient(ctx context.Context) (client.Client, string, error) {
+//
+// Every path ends at a `pgmanager serve` over HTTP — remote over HTTPS, or
+// local over a unix socket. The CLI never talks to Postgres itself, so it
+// never needs Postgres credentials or the encryption key.
+func getClient() (*client.HTTPClient, string, error) {
 	// An explicit --socket beats everything: it's how you say "talk to the
 	// server running right here", regardless of what's in credentials.yaml.
 	if socketFlag != "" {
@@ -128,23 +131,7 @@ func getClient(ctx context.Context) (client.Client, string, error) {
 		}
 		return client.NewHTTP(profile.APIURL, token), name, nil
 	}
-	if profile.Postgres != nil {
-		// Build a temporary server config to feed OpenLocal.
-		cfg := config.Default()
-		cfg.Postgres = *profile.Postgres
-		if profile.Crypto != nil {
-			cfg.Crypto = *profile.Crypto
-		}
-		if key := os.Getenv("PGMANAGER_ENCRYPTION_KEY"); key != "" {
-			cfg.Crypto.Key = key
-		}
-		c, err := client.OpenLocal(ctx, cfg)
-		if err != nil {
-			return nil, name, err
-		}
-		return c, name, nil
-	}
-	return nil, name, fmt.Errorf("profile %q is empty", name)
+	return nil, name, fmt.Errorf("profile %q has neither api_url nor socket; run: pgmanager login <api-url>", name)
 }
 
 // --- project commands -------------------------------------------------------
@@ -158,7 +145,7 @@ func newProjectCmd() *cobra.Command {
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				ctx := cmd.Context()
-				c, _, err := getClient(ctx)
+				c, _, err := getClient()
 				if err != nil {
 					return err
 				}
@@ -176,7 +163,7 @@ func newProjectCmd() *cobra.Command {
 			Short: "List all projects",
 			RunE: func(cmd *cobra.Command, args []string) error {
 				ctx := cmd.Context()
-				c, _, err := getClient(ctx)
+				c, _, err := getClient()
 				if err != nil {
 					return err
 				}
@@ -204,7 +191,7 @@ func newProjectCmd() *cobra.Command {
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				ctx := cmd.Context()
-				c, _, err := getClient(ctx)
+				c, _, err := getClient()
 				if err != nil {
 					return err
 				}
@@ -241,7 +228,7 @@ func newDBCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			c, _, err := getClient(ctx)
+			c, _, err := getClient()
 			if err != nil {
 				return err
 			}
@@ -270,7 +257,7 @@ func newDBCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				c, _, err := getClient(ctx)
+				c, _, err := getClient()
 				if err != nil {
 					return err
 				}
@@ -289,7 +276,7 @@ func newDBCmd() *cobra.Command {
 			Args:  cobra.MaximumNArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				ctx := cmd.Context()
-				c, _, err := getClient(ctx)
+				c, _, err := getClient()
 				if err != nil {
 					return err
 				}
@@ -329,7 +316,7 @@ func newDBCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				c, _, err := getClient(ctx)
+				c, _, err := getClient()
 				if err != nil {
 					return err
 				}
@@ -358,7 +345,7 @@ func newDBCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				c, _, err := getClient(ctx)
+				c, _, err := getClient()
 				if err != nil {
 					return err
 				}
@@ -387,7 +374,7 @@ func newCleanupCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("invalid duration: %w", err)
 			}
-			c, _, err := getClient(ctx)
+			c, _, err := getClient()
 			if err != nil {
 				return err
 			}
@@ -449,8 +436,7 @@ func newTUICmd() *cobra.Command {
 		Use:   "tui",
 		Short: "Start the interactive terminal UI",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			c, _, err := getClient(ctx)
+			c, _, err := getClient()
 			if err != nil {
 				return err
 			}
@@ -691,14 +677,15 @@ func newProfileCmd() *cobra.Command {
 					Name    string `json:"name"`
 					Mode    string `json:"mode"`
 					APIURL  string `json:"api_url,omitempty"`
+					Socket  string `json:"socket,omitempty"`
 					Current bool   `json:"current"`
 				}
 				var rows []row
 				for n, p := range clientCfg.Profiles {
-					rows = append(rows, row{Name: n, Mode: p.Mode(), APIURL: p.APIURL, Current: n == clientCfg.Current})
+					rows = append(rows, row{Name: n, Mode: p.Mode(), APIURL: p.APIURL, Socket: p.Socket, Current: n == clientCfg.Current})
 				}
 				return emit(rows, func() {
-					fmt.Printf("%-20s %-8s %s\n", "NAME", "MODE", "URL/MODE")
+					fmt.Printf("%-20s %-8s %s\n", "NAME", "MODE", "TARGET")
 					fmt.Println(strings.Repeat("-", 50))
 					for _, r := range rows {
 						marker := "  "
@@ -707,7 +694,7 @@ func newProfileCmd() *cobra.Command {
 						}
 						target := r.APIURL
 						if target == "" {
-							target = "(direct postgres)"
+							target = r.Socket
 						}
 						fmt.Printf("%s%-18s %-8s %s\n", marker, r.Name, r.Mode, target)
 					}
@@ -747,17 +734,16 @@ func newProfileCmd() *cobra.Command {
 					view["api_url"] = p.APIURL
 					view["token_set"] = p.Token != ""
 				}
-				if p.Postgres != nil {
-					view["postgres_host"] = p.Postgres.Host
-					view["postgres_port"] = p.Postgres.Port
+				if p.Socket != "" {
+					view["socket"] = p.Socket
 				}
 				return emit(view, func() {
 					fmt.Printf("name:       %s\nmode:       %s\n", name, p.Mode())
 					if p.APIURL != "" {
 						fmt.Printf("api_url:    %s\ntoken_set:  %v\n", p.APIURL, p.Token != "")
 					}
-					if p.Postgres != nil {
-						fmt.Printf("postgres:   %s:%d\n", p.Postgres.Host, p.Postgres.Port)
+					if p.Socket != "" {
+						fmt.Printf("socket:     %s\n", p.Socket)
 					}
 				})
 			},
@@ -776,7 +762,7 @@ func newAuthCmd() *cobra.Command {
 		Short: "Show the current token's prefix and scopes",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, _, err := getClient(ctx)
+			c, _, err := getClient()
 			if err != nil {
 				return err
 			}
@@ -796,7 +782,7 @@ func newAuthCmd() *cobra.Command {
 		Short: "List API tokens",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, _, err := getClient(ctx)
+			c, _, err := getClient()
 			if err != nil {
 				return err
 			}
@@ -836,7 +822,7 @@ func newAuthCmd() *cobra.Command {
 			if name == "" || len(scopes) == 0 {
 				return fmt.Errorf("--name and --scope are required")
 			}
-			c, _, err := getClient(ctx)
+			c, _, err := getClient()
 			if err != nil {
 				return err
 			}
@@ -869,7 +855,7 @@ func newAuthCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, _, err := getClient(ctx)
+			c, _, err := getClient()
 			if err != nil {
 				return err
 			}
@@ -888,10 +874,11 @@ func newAuthCmd() *cobra.Command {
 		Short: "List devices waiting for authorization",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := getDeviceClient(ctx)
+			c, _, err := getClient()
 			if err != nil {
 				return err
 			}
+			defer c.Close()
 			reqs, err := c.ListDeviceRequests(ctx)
 			if err != nil {
 				return err
@@ -922,10 +909,11 @@ func newAuthCmd() *cobra.Command {
 			if len(scopes) == 0 {
 				return fmt.Errorf("--scope is required: decide what this device may do")
 			}
-			c, err := getDeviceClient(ctx)
+			c, _, err := getClient()
 			if err != nil {
 				return err
 			}
+			defer c.Close()
 			info, err := c.ApproveDeviceRequest(ctx, args[0], name, scopes, expires)
 			if err != nil {
 				return err
@@ -948,10 +936,11 @@ func newAuthCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, err := getDeviceClient(ctx)
+			c, _, err := getClient()
 			if err != nil {
 				return err
 			}
+			defer c.Close()
 			if err := c.DenyDeviceRequest(ctx, args[0]); err != nil {
 				return err
 			}
@@ -962,23 +951,6 @@ func newAuthCmd() *cobra.Command {
 	})
 
 	return cmd
-}
-
-// getDeviceClient returns a client that can manage device authorizations.
-// These endpoints only exist on the HTTP API, so a direct-Postgres profile
-// can't serve them.
-func getDeviceClient(ctx context.Context) (*client.HTTPClient, error) {
-	c, name, err := getClient(ctx)
-	if err != nil {
-		return nil, err
-	}
-	hc, ok := c.(*client.HTTPClient)
-	if !ok {
-		c.Close()
-		return nil, fmt.Errorf("profile %q talks to Postgres directly; device authorization needs the API "+
-			"(use an api_url profile, or --socket on the server itself)", name)
-	}
-	return hc, nil
 }
 
 // --- doctor & keygen --------------------------------------------------------
@@ -1004,7 +976,7 @@ func newDoctorCmd() *cobra.Command {
 				report["api_url"] = p.APIURL
 				report["token_set"] = p.Token != ""
 			}
-			c, _, err := getClient(ctx)
+			c, _, err := getClient()
 			if err != nil {
 				report["client_error"] = err.Error()
 				return emit(report, func() { printDoctor(report) })
