@@ -48,8 +48,8 @@ func NewServer(cfg *config.Config, mgr *project.Manager, store meta.Store, addr 
 		// and hopeless for a guessing loop.
 		loginLimiter: NewLoginLimiter(5, 15*time.Minute),
 	}
-	s.router = s.buildRouter(s.authMiddleware, false)
-	s.socketRouter = s.buildRouter(s.localAuthMiddleware, true)
+	s.router = s.buildRouter(s.authMiddleware)
+	s.socketRouter = s.buildRouter(s.localAuthMiddleware)
 	return s
 }
 
@@ -58,11 +58,10 @@ func NewServer(cfg *config.Config, mgr *project.Manager, store meta.Store, addr 
 // peer-credential auth. The handlers themselves are identical — they only
 // ever read the principal back out of the request context.
 //
-// local additionally registers the user-management routes. Those exist only
-// on the socket, so the allowlist of humans who can sign in to the admin UI
-// can only be changed from the server itself: off-box the routes are absent
-// and answer 404, which no token can talk its way past.
-func (s *Server) buildRouter(authMW func(http.Handler) http.Handler, local bool) *chi.Mux {
+// Note there are no user-management routes on either router: the allowlist of
+// humans who can sign in is edited by `pgmanager users` against the database
+// directly, so it has no HTTP surface at all to attack or to lock you out of.
+func (s *Server) buildRouter(authMW func(http.Handler) http.Handler) *chi.Mux {
 	r := chi.NewRouter()
 
 	r.Use(middleware.Recoverer)
@@ -97,14 +96,6 @@ func (s *Server) buildRouter(authMW func(http.Handler) http.Handler, local bool)
 		r.Post("/auth/login", s.login)
 		r.Post("/auth/logout", s.logout)
 		r.Post("/auth/password", s.changePassword)
-
-		// The allowlist of humans, reachable only from the server itself.
-		if local {
-			r.Get("/users", s.listUsers)
-			r.Post("/users", s.createUser)
-			r.Post("/users/{email}/password", s.setUserPassword)
-			r.Delete("/users/{email}", s.deleteUser)
-		}
 
 		// Device authorization. The first two are reached before the caller
 		// has any credentials — see the bypass in authMiddleware.
@@ -203,6 +194,7 @@ func (s *Server) Start() error {
 	if n, err := s.store.CountUsers(context.Background()); err == nil && n == 0 {
 		log.Printf("No admin users configured — the web UI cannot be signed into.")
 		log.Printf("Run `pgmanager users add <email>` on this host to create one.")
+		log.Printf("(It talks to Postgres directly using this config, so it works whether or not the admin socket is enabled.)")
 	}
 
 	srv := &http.Server{

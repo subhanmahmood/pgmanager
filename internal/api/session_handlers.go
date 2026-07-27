@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -51,13 +52,23 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	email := auth.NormalizeEmail(req.Email)
 
-	// Throttle before doing any work: argon2 is deliberately expensive, so
-	// unbounded attempts are a denial-of-service lever as well as a guessing one.
+	// Two budgets, deliberately enforced differently.
+	//
+	// The per-IP budget is a hard stop before any work: argon2 is expensive on
+	// purpose, so unbounded attempts are a denial-of-service lever as well as a
+	// guessing one, and the IP is the attacker's own resource to burn.
+	//
+	// The per-email budget is NOT a hard stop, because it is keyed on something
+	// an attacker chooses. Rejecting a correct password once that budget is
+	// spent would let anyone who knows an administrator's address lock them out
+	// indefinitely for the cost of five requests a quarter hour. So it only
+	// gates *failed* attempts: a valid credential always gets in.
 	ipKey, emailKey := "ip:"+getClientIP(r), "email:"+email
-	if !s.loginLimiter.Allow(ipKey, emailKey) {
+	if !s.loginLimiter.Allow(ipKey) {
 		writeError(w, http.StatusTooManyRequests, "too many sign-in attempts; try again later")
 		return
 	}
+	emailBudgetLeft := s.loginLimiter.Allow(emailKey)
 
 	user, err := s.store.GetUserByEmail(r.Context(), email)
 	if err != nil {
@@ -73,6 +84,12 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	ok := auth.VerifyPassword(hash, req.Password)
 	if user == nil || !user.Active() || !ok {
+		// Sustained wrong guesses against one address do get throttled — that
+		// is the distributed-guessing case the email budget exists for.
+		if !emailBudgetLeft {
+			writeError(w, http.StatusTooManyRequests, "too many sign-in attempts; try again later")
+			return
+		}
 		writeError(w, http.StatusUnauthorized, invalidLogin)
 		return
 	}
@@ -80,6 +97,13 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	s.loginLimiter.Reset(ipKey, emailKey)
 
 	sess, plain, err := s.newSession(r, user)
+	if errors.Is(err, meta.ErrPasswordChanged) {
+		// The password moved between verification and here, so what we checked
+		// is already stale. Make them sign in again rather than issuing a
+		// session a reset was meant to prevent.
+		writeError(w, http.StatusUnauthorized, invalidLogin)
+		return
+	}
 	if err != nil {
 		writeInternalError(w, "create session", err)
 		return
@@ -167,7 +191,7 @@ func (s *Server) newSession(r *http.Request, user *meta.User) (*meta.Session, st
 		ExpiresAt: time.Now().Add(s.sessionTTL()),
 		CreatedIP: getClientIP(r),
 	}
-	if err := s.store.CreateSession(r.Context(), sess); err != nil {
+	if err := s.store.CreateSession(r.Context(), sess, user.PasswordChangedAt); err != nil {
 		return nil, "", err
 	}
 	return sess, plain, nil

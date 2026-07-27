@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -956,19 +957,22 @@ func newAuthCmd() *cobra.Command {
 
 // --- users ------------------------------------------------------------------
 
-// newUsersCmd manages the allowlist of humans who can sign in to the admin
-// UI. These endpoints exist only on the local admin socket, so every command
-// here must be run on the server itself — that restriction is the whole
-// reason the allowlist can be trusted.
+// newUsersCmd manages the allowlist of humans who can sign in to the admin UI.
+//
+// These commands talk to Postgres directly using the *server* config, exactly
+// as `serve` does — they are not API calls. That means user management has no
+// HTTP surface at all: it cannot be reached over the network by any token, and
+// equally it cannot be locked out by the API being down, the admin socket
+// being disabled, or the allowlist being empty. Provisioning the first account
+// is always possible from the box that holds pgmanager.yaml.
 func newUsersCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "users",
-		Short: "Manage admin UI users (server-side only)",
+		Short: "Manage admin UI users (run on the server)",
 		Long: "Manage the allowlist of people who can sign in to the admin UI.\n\n" +
-			"These commands only work on the machine running `pgmanager serve`,\n" +
-			"because they go over its local admin socket. That is deliberate: it\n" +
-			"means no token \u2014 however privileged or however leaked \u2014 can add a user\n" +
-			"remotely.",
+			"These commands read the server config (pgmanager.yaml) and edit the\n" +
+			"database directly, so they must run on the machine that hosts\n" +
+			"pgmanager \u2014 which is exactly the point: no API token can add a user.",
 	}
 
 	addCmd := &cobra.Command{
@@ -977,24 +981,37 @@ func newUsersCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			password, err := passwordFromFlags(cmd)
+			email := auth.NormalizeEmail(args[0])
+			if !auth.ValidEmail(email) {
+				return fmt.Errorf("%q is not a valid email address", args[0])
+			}
+			password, generated, err := userPassword(cmd)
 			if err != nil {
 				return err
 			}
-			c, _, err := getClient()
+			hash, err := auth.HashPassword(password)
 			if err != nil {
 				return err
 			}
-			defer c.Close()
-			created, err := c.CreateUser(ctx, args[0], password)
+
+			store, err := openServerStore(ctx)
 			if err != nil {
 				return err
 			}
-			return emit(created, func() {
-				fmt.Printf("Added %s\n", created.User.Email)
-				if created.Password != "" {
-					fmt.Println("\nPASSWORD (save this \u2014 it will not be shown again):")
-					fmt.Println("  " + created.Password)
+			defer store.Close()
+
+			user := &meta.User{Email: email, PasswordHash: hash, CreatedBy: localOperator()}
+			if err := store.CreateUser(ctx, user); err != nil {
+				return err
+			}
+			out := map[string]interface{}{"email": email}
+			if generated {
+				out["password"] = password
+			}
+			return emit(out, func() {
+				fmt.Printf("Added %s\n", email)
+				if generated {
+					printOnce(password)
 					fmt.Println("\nThey can change it from the admin UI after signing in.")
 				}
 			})
@@ -1008,12 +1025,13 @@ func newUsersCmd() *cobra.Command {
 		Short: "List admin UI users",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, _, err := getClient()
+			store, err := openServerStore(ctx)
 			if err != nil {
 				return err
 			}
-			defer c.Close()
-			users, err := c.ListUsers(ctx)
+			defer store.Close()
+
+			users, err := store.ListUsers(ctx)
 			if err != nil {
 				return err
 			}
@@ -1028,9 +1046,9 @@ func newUsersCmd() *cobra.Command {
 				for _, u := range users {
 					last := "never"
 					if u.LastLoginAt != nil {
-						last = *u.LastLoginAt
+						last = u.LastLoginAt.Format("2006-01-02 15:04")
 					}
-					fmt.Printf("%-32s %-20s %s\n", u.Email, u.CreatedAt, last)
+					fmt.Printf("%-32s %-20s %s\n", u.Email, u.CreatedAt.Format("2006-01-02 15:04"), last)
 				}
 			})
 		},
@@ -1042,24 +1060,33 @@ func newUsersCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			password, err := passwordFromFlags(cmd)
+			email := auth.NormalizeEmail(args[0])
+			password, generated, err := userPassword(cmd)
 			if err != nil {
 				return err
 			}
-			c, _, err := getClient()
+			hash, err := auth.HashPassword(password)
 			if err != nil {
 				return err
 			}
-			defer c.Close()
-			out, err := c.SetUserPassword(ctx, args[0], password)
+
+			store, err := openServerStore(ctx)
 			if err != nil {
 				return err
+			}
+			defer store.Close()
+
+			if err := store.SetUserPassword(ctx, email, hash); err != nil {
+				return err
+			}
+			out := map[string]interface{}{"email": email, "status": "password-reset"}
+			if generated {
+				out["password"] = password
 			}
 			return emit(out, func() {
-				fmt.Printf("Password reset for %s \u2014 existing sessions were signed out\n", args[0])
-				if out.Password != "" {
-					fmt.Println("\nPASSWORD (save this \u2014 it will not be shown again):")
-					fmt.Println("  " + out.Password)
+				fmt.Printf("Password reset for %s \u2014 existing sessions were signed out\n", email)
+				if generated {
+					printOnce(password)
 				}
 			})
 		},
@@ -1073,16 +1100,18 @@ func newUsersCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			c, _, err := getClient()
+			email := auth.NormalizeEmail(args[0])
+			store, err := openServerStore(ctx)
 			if err != nil {
 				return err
 			}
-			defer c.Close()
-			if err := c.DeleteUser(ctx, args[0]); err != nil {
+			defer store.Close()
+
+			if err := store.DeleteUser(ctx, email); err != nil {
 				return err
 			}
-			return emit(map[string]string{"status": "removed", "email": args[0]}, func() {
-				fmt.Printf("Removed %s \u2014 their sessions are gone too\n", args[0])
+			return emit(map[string]string{"status": "removed", "email": email}, func() {
+				fmt.Printf("Removed %s \u2014 their sessions are gone too\n", email)
 			})
 		},
 	})
@@ -1090,23 +1119,58 @@ func newUsersCmd() *cobra.Command {
 	return cmd
 }
 
-// passwordFromFlags reads a password from stdin when --password-stdin is set.
-// An empty return means "let the server generate one", which is the default:
-// it avoids a terminal-echo dependency and matches how tokens already work.
-func passwordFromFlags(cmd *cobra.Command) (string, error) {
+// openServerStore connects to Postgres using the server config, the same way
+// `serve` does. The encryption key is passed when available but is not
+// required: users and sessions store hashes, never anything encrypted, so
+// provisioning still works on a host where the key is not present.
+func openServerStore(ctx context.Context) (meta.Store, error) {
+	cfg, err := loadServerConfig()
+	if err != nil {
+		return nil, fmt.Errorf("%w\n\nRun this on the machine hosting pgmanager, or point at its config with --config", err)
+	}
+	key, _ := cfg.Crypto.EncryptionKey()
+	return meta.NewPostgresStore(ctx, cfg.Postgres.ConnectionString(), key)
+}
+
+// localOperator names whoever ran the command, for the created_by column.
+func localOperator() string {
+	name := os.Getenv("SUDO_USER")
+	if name == "" {
+		name = os.Getenv("USER")
+	}
+	if name == "" {
+		return "local"
+	}
+	host, _ := os.Hostname()
+	if host == "" {
+		return name
+	}
+	return name + "@" + host
+}
+
+func printOnce(password string) {
+	fmt.Println("\nPASSWORD (save this \u2014 it will not be shown again):")
+	fmt.Println("  " + password)
+}
+
+// userPassword returns the password to set and whether it was generated.
+// Generating by default avoids a terminal-echo dependency and matches how
+// tokens already work; --password-stdin is there for scripted provisioning.
+func userPassword(cmd *cobra.Command) (string, bool, error) {
 	fromStdin, _ := cmd.Flags().GetBool("password-stdin")
 	if !fromStdin {
-		return "", nil
+		p, err := auth.GeneratePassword()
+		return p, true, err
 	}
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && line == "" {
-		return "", fmt.Errorf("read password from stdin: %w", err)
+		return "", false, fmt.Errorf("read password from stdin: %w", err)
 	}
 	password := strings.TrimRight(line, "\r\n")
-	if password == "" {
-		return "", fmt.Errorf("no password on stdin")
+	if len(password) < auth.MinPasswordLen {
+		return "", false, fmt.Errorf("password must be at least %d characters", auth.MinPasswordLen)
 	}
-	return password, nil
+	return password, false, nil
 }
 
 // --- doctor & keygen --------------------------------------------------------

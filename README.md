@@ -114,10 +114,16 @@ Full walkthrough — including TLS, secrets, and the `upgrade.sh` workflow — i
 
 ## Managing admin users
 
-Who may sign in to the UI is an allowlist of email addresses, and it is editable
-**only from the server itself** — those API routes exist only on the local
-socket, so off-box they return 404. No token, however privileged or however
-leaked, can add a user remotely.
+Who may sign in to the UI is an allowlist of email addresses. `pgmanager users`
+edits it in the database directly, using the *server* config — it is not an API
+call, and there is no HTTP route that can change the allowlist.
+
+That cuts both ways on purpose. No request, however authenticated, can add a
+user: a leaked admin token cannot mint itself a UI login that outlives the
+token. And provisioning never depends on the API being up, the admin socket
+being enabled, or an account already existing, so there is no state in which
+the first account can't be created. Run these on the machine hosting
+pgmanager (`docker compose exec pgmanager …` for the bundled Deployment).
 
 ```bash
 pgmanager users add subhan@example.com          # prints a generated password once

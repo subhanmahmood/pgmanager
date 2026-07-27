@@ -112,6 +112,7 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 		id SERIAL PRIMARY KEY,
 		email TEXT UNIQUE NOT NULL,
 		password_hash TEXT NOT NULL,
+		password_changed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
 		created_by TEXT,
 		last_login_at TIMESTAMPTZ,
@@ -127,6 +128,8 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 		last_seen_at TIMESTAMPTZ,
 		created_ip TEXT
 	);
+
+	ALTER TABLE pgmanager.users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
 
 	CREATE INDEX IF NOT EXISTS idx_sessions_user ON pgmanager.sessions(user_id);
 	CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON pgmanager.sessions(expires_at);
@@ -724,7 +727,7 @@ func (s *PostgresStore) scanDeviceRow(rows pgx.Rows) (*DeviceRequest, error) {
 
 // --- User operations ---------------------------------------------------------
 
-const userSelect = `SELECT id, email, password_hash, created_at, created_by, last_login_at, disabled_at FROM pgmanager.users`
+const userSelect = `SELECT id, email, password_hash, password_changed_at, created_at, created_by, last_login_at, disabled_at FROM pgmanager.users`
 
 func (s *PostgresStore) CreateUser(ctx context.Context, u *User) error {
 	var id int64
@@ -746,7 +749,8 @@ func (s *PostgresStore) GetUserByEmail(ctx context.Context, email string) (*User
 	var u User
 	var createdBy *string
 	err := s.pool.QueryRow(ctx, userSelect+" WHERE email = $1", email).Scan(
-		&u.ID, &u.Email, &u.PasswordHash, &u.CreatedAt, &createdBy, &u.LastLoginAt, &u.DisabledAt)
+		&u.ID, &u.Email, &u.PasswordHash, &u.PasswordChangedAt, &u.CreatedAt,
+		&createdBy, &u.LastLoginAt, &u.DisabledAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -768,8 +772,8 @@ func (s *PostgresStore) ListUsers(ctx context.Context) ([]User, error) {
 	for rows.Next() {
 		var u User
 		var createdBy *string
-		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.CreatedAt,
-			&createdBy, &u.LastLoginAt, &u.DisabledAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.PasswordChangedAt,
+			&u.CreatedAt, &createdBy, &u.LastLoginAt, &u.DisabledAt); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
 		u.CreatedBy = derefString(createdBy)
@@ -778,22 +782,34 @@ func (s *PostgresStore) ListUsers(ctx context.Context) ([]User, error) {
 	return out, rows.Err()
 }
 
+// SetUserPassword changes the password and signs out every existing session
+// for that user. Both happen in one transaction: a partial apply would leave
+// the password changed while old browsers stayed usable, which is precisely
+// the situation a reset exists to end.
+//
+// Sessions being created concurrently are handled separately — see
+// CreateSession, which refuses to insert against a password that has moved.
 func (s *PostgresStore) SetUserPassword(ctx context.Context, email, passwordHash string) error {
-	result, err := s.pool.Exec(ctx,
-		`UPDATE pgmanager.users SET password_hash = $1 WHERE email = $2`, passwordHash, email)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("set password: %w", err)
 	}
-	if result.RowsAffected() == 0 {
+	defer tx.Rollback(ctx)
+
+	var userID int64
+	err = tx.QueryRow(ctx,
+		`UPDATE pgmanager.users SET password_hash = $1, password_changed_at = NOW()
+		 WHERE email = $2 RETURNING id`, passwordHash, email).Scan(&userID)
+	if err == pgx.ErrNoRows {
 		return fmt.Errorf("user not found: %s", email)
 	}
-	// A password change must not leave old browsers signed in.
-	if _, err := s.pool.Exec(ctx,
-		`DELETE FROM pgmanager.sessions WHERE user_id = (SELECT id FROM pgmanager.users WHERE email = $1)`,
-		email); err != nil {
+	if err != nil {
+		return fmt.Errorf("set password: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM pgmanager.sessions WHERE user_id = $1`, userID); err != nil {
 		return fmt.Errorf("clear sessions: %w", err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (s *PostgresStore) DeleteUser(ctx context.Context, email string) error {
@@ -823,14 +839,25 @@ func (s *PostgresStore) CountUsers(ctx context.Context) (int, error) {
 
 // --- Session operations ------------------------------------------------------
 
-func (s *PostgresStore) CreateSession(ctx context.Context, sess *Session) error {
+// CreateSession stores a session, but only if the user's password has not
+// changed since the caller verified it. Without that check a login racing a
+// password reset could verify the old password, then insert its session after
+// the reset had already deleted the others — leaving exactly the survivor the
+// reset was meant to remove. The guarded insert is a compare-and-set, so it
+// needs no locking.
+func (s *PostgresStore) CreateSession(ctx context.Context, sess *Session, expectPasswordChangedAt time.Time) error {
 	var id int64
 	var createdAt time.Time
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO pgmanager.sessions (token_hash, user_id, expires_at, created_ip)
-		 VALUES ($1, $2, $3, $4) RETURNING id, created_at`,
-		sess.TokenHash, sess.UserID, sess.ExpiresAt, sess.CreatedIP,
+		 SELECT $1, u.id, $3, $4 FROM pgmanager.users u
+		 WHERE u.id = $2 AND u.password_changed_at = $5
+		 RETURNING id, created_at`,
+		sess.TokenHash, sess.UserID, sess.ExpiresAt, sess.CreatedIP, expectPasswordChangedAt,
 	).Scan(&id, &createdAt)
+	if err == pgx.ErrNoRows {
+		return ErrPasswordChanged
+	}
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}

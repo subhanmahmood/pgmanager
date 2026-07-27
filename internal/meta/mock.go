@@ -438,6 +438,9 @@ func (s *MockStore) HasActiveAdminToken(ctx context.Context) (bool, error) {
 func (s *MockStore) CreateUser(ctx context.Context, u *User) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if u.PasswordChangedAt.IsZero() {
+		u.PasswordChangedAt = time.Now()
+	}
 	for _, existing := range s.users {
 		if existing.Email == u.Email {
 			return fmt.Errorf("user already exists: %s", u.Email)
@@ -481,6 +484,7 @@ func (s *MockStore) SetUserPassword(ctx context.Context, email, passwordHash str
 	for _, u := range s.users {
 		if u.Email == email {
 			u.PasswordHash = passwordHash
+			u.PasswordChangedAt = time.Now()
 			// Changing a password signs out every existing browser.
 			for id, sess := range s.sessions {
 				if sess.UserID == u.ID {
@@ -527,9 +531,15 @@ func (s *MockStore) CountUsers(ctx context.Context) (int, error) {
 
 // --- Session operations ------------------------------------------------------
 
-func (s *MockStore) CreateSession(ctx context.Context, sess *Session) error {
+func (s *MockStore) CreateSession(ctx context.Context, sess *Session, expectPasswordChangedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Mirrors the guarded insert in PostgresStore: a session authorized by a
+	// password that has since changed must not survive.
+	u, ok := s.users[sess.UserID]
+	if !ok || !u.PasswordChangedAt.Equal(expectPasswordChangedAt) {
+		return ErrPasswordChanged
+	}
 	sess.ID = s.nextSID
 	if sess.CreatedAt.IsZero() {
 		sess.CreatedAt = time.Now()

@@ -247,10 +247,10 @@ the CLI probing for one.
 
 ## Use Case — Manage who can sign in to the admin UI
 
-The UI is gated by an allowlist of email addresses. Those routes exist **only
-on the local admin socket**, so this can only be done from the server — no
-token, however privileged or however leaked, can add a user remotely. That
-restriction is the entire reason the allowlist can be trusted.
+The UI is gated by an allowlist of email addresses. `pgmanager users` edits it
+in the database directly using the server config — there is no API route for
+it, so no token can add a user remotely, and equally no amount of API or socket
+misconfiguration can stop you provisioning the first account.
 
 ```bash
 docker compose exec pgmanager pgmanager users add subhan@example.com

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -162,11 +164,67 @@ func TestLoginThrottled(t *testing.T) {
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("6th attempt: status %d, want 429", w.Code)
 	}
-	// Even the correct password is refused while throttled — otherwise the
-	// limit is no obstacle to a guessing loop that eventually gets it right.
-	w = postJSON(t, fx, "/api/auth/login", LoginRequest{Email: "me@example.com", Password: testPassword})
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("correct password while throttled: status %d, want 429", w.Code)
+}
+
+// The per-email budget must never become an account-lockout lever: anyone who
+// knows an administrator's address could otherwise keep them out forever with
+// five requests a quarter hour. A correct password always gets in.
+func TestThrottleCannotLockOutAValidPassword(t *testing.T) {
+	fx := setupTestServer(t)
+	defer fx.cleanup()
+	seedUser(t, fx, "victim@example.com")
+
+	// The attacker burns the victim's email budget from their own address.
+	// getClientIP reads RemoteAddr, which httptest sets per request, so vary
+	// it to model a distributed attempt rather than one exhausted IP.
+	for i := 0; i < 10; i++ {
+		b, _ := json.Marshal(LoginRequest{Email: "victim@example.com", Password: "wrong"})
+		req := httptest.NewRequest("POST", "/api/auth/login", bytes.NewReader(b))
+		req.RemoteAddr = fmt.Sprintf("203.0.113.%d:5555", i+1)
+		w := httptest.NewRecorder()
+		fx.server.Router().ServeHTTP(w, req)
+	}
+
+	// The victim, from their own address, signs in fine.
+	b, _ := json.Marshal(LoginRequest{Email: "victim@example.com", Password: testPassword})
+	req := httptest.NewRequest("POST", "/api/auth/login", bytes.NewReader(b))
+	req.RemoteAddr = "198.51.100.7:5555"
+	w := httptest.NewRecorder()
+	fx.server.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("victim locked out by an attacker's failed attempts: status %d, body %s", w.Code, w.Body.String())
+	}
+}
+
+// A login that verified a password which changed before its session was
+// written must not end up with a working session — that is exactly the
+// survivor a reset is meant to remove.
+func TestSessionLosingRaceWithPasswordChangeIsRejected(t *testing.T) {
+	fx := setupTestServer(t)
+	defer fx.cleanup()
+	user := seedUser(t, fx, "me@example.com")
+	stale := user.PasswordChangedAt
+
+	newHash, err := auth.HashPassword("a-brand-new-password")
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if err := fx.store.SetUserPassword(context.Background(), "me@example.com", newHash); err != nil {
+		t.Fatalf("set password: %v", err)
+	}
+
+	// Now try to insert a session authorized by the superseded password.
+	_, hash, err := auth.GenerateSessionToken()
+	if err != nil {
+		t.Fatalf("generate session: %v", err)
+	}
+	err = fx.store.CreateSession(context.Background(), &meta.Session{
+		TokenHash: hash,
+		UserID:    user.ID,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}, stale)
+	if !errors.Is(err, meta.ErrPasswordChanged) {
+		t.Fatalf("stale session insert returned %v, want ErrPasswordChanged", err)
 	}
 }
 
@@ -208,7 +266,7 @@ func TestExpiredSessionRejected(t *testing.T) {
 		TokenHash: hash,
 		UserID:    user.ID,
 		ExpiresAt: time.Now().Add(-time.Minute),
-	}); err != nil {
+	}, user.PasswordChangedAt); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
 
