@@ -1,6 +1,7 @@
-// Package client exposes the operations the CLI and TUI need, abstracting
-// over whether they talk to a remote `pgmanager serve` (HTTPClient) or hit
-// PostgreSQL directly (LocalClient).
+// Package client exposes the operations the CLI and TUI need. Everything
+// goes through `pgmanager serve` over HTTP — either a remote one over HTTPS
+// or, on the server itself, a local unix socket. Clients never hold Postgres
+// credentials, so every request is scoped and audited.
 package client
 
 import (

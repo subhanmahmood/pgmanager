@@ -4,10 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What pgmanager is
 
-A small Go service + CLI for creating, listing, and deleting PostgreSQL databases per project. There are two ways to use it:
+A small Go service + CLI for creating, listing, and deleting PostgreSQL databases per project.
 
-1. **API mode (default for laptops + CI)** — talk to a remote `pgmanager serve` over HTTPS with a scoped bearer token. The remote VPS holds the Postgres credentials; clients only hold a token.
-2. **Local mode (for admin work and local dev)** — the CLI connects directly to Postgres. Used by `pgmanager serve` itself, and as an opt-in profile for local development.
+`pgmanager serve` is the only thing that ever holds Postgres credentials. Every client reaches it over HTTP, in one of two ways:
+
+1. **Remote (laptops + CI)** — HTTPS to a `pgmanager serve` on a VPS, with a scoped bearer token.
+2. **Local socket (admin work on the server itself)** — a unix socket that `serve` optionally listens on. Opening it *is* the authorization, so there is no token; see `api.socket`.
+
+Both go through the same handlers, so every request is scope-checked and audited. There is no direct-Postgres client path — it was removed because it bypassed both.
 
 All metadata (projects, databases, tokens) lives in a `pgmanager` schema inside the same Postgres server. DB passwords are AES-GCM encrypted at rest with an operator-supplied key.
 
@@ -23,11 +27,12 @@ curl -sSL https://raw.githubusercontent.com/subhanmahmood/pgmanager/master/insta
 
 Download the binary for your platform from [GitHub Releases](https://github.com/subhanmahmood/pgmanager/releases).
 
-## Quick start — laptop (API mode)
+## Quick start — laptop
 
 ```bash
 pgmanager login https://pgm.example.com
-# paste the bootstrap admin token (printed once on the VPS at first boot)
+# prints a one-time code; approve it from the admin UI (or `pgmanager auth
+# approve <code>` on the server). --with-token pastes an existing token instead.
 
 pgmanager auth whoami        # confirm
 pgmanager project create myapp
@@ -129,6 +134,11 @@ api:
   # web_dir — directory holding the static admin UI. Empty = "./web" if it
   # exists; "-" disables the UI and serves the JSON API only.
   web_dir: ""
+  # socket — optional unix socket for local admin access. Anyone who can open
+  # it is treated as admin (file permissions are the authorization), so it is
+  # created mode 0660. Empty = disabled.
+  socket: ""
+  socket_group: ""        # optional group to own the socket
 crypto:
   key: ""                 # base64, 32 bytes — `pgmanager keygen` to create one
   # key_file: /run/secrets/pgmanager_key  # alternative
@@ -139,7 +149,7 @@ cleanup:
 
 ### `credentials.yaml` (client-side, used by every other command)
 
-Stored at `$XDG_CONFIG_HOME/pgmanager/credentials.yaml` (default `~/.config/pgmanager/credentials.yaml`), mode `0600`. Holds named profiles:
+Stored at `$XDG_CONFIG_HOME/pgmanager/credentials.yaml` (default `~/.config/pgmanager/credentials.yaml`), mode `0600`. A profile sets either `api_url` (+ `token`) or `socket`:
 
 ```yaml
 current: prod
@@ -147,26 +157,22 @@ profiles:
   prod:
     api_url: https://pgm.example.com
     token: pgm_live_xxxxxxxxxxxxxxxx
-  local:
-    postgres:
-      host: localhost
-      port: 5432
-      user: postgres
-      password: postgres
-      ssl_mode: disable
-    crypto:
-      key: base64+32bytes
+  server:
+    socket: /run/pgmanager/pgmanager.sock
 ```
+
+On the server you usually need no profile at all — the CLI probes for the socket by itself.
 
 Managed via `pgmanager login / logout / profile use / profile show`.
 
 ### Precedence (highest wins)
 
-1. CLI flags (`--config`, `--profile`).
+1. CLI flags (`--socket`, `--config`, `--profile`).
 2. `PGMANAGER_API_URL` + `PGMANAGER_API_TOKEN` env vars (synthesizes an `env` profile, bypasses the file entirely — this is the CI path).
 3. `PGMANAGER_PROFILE` env var.
 4. `current:` in `credentials.yaml`.
-5. `pgmanager.yaml` (server-side only).
+5. A local admin socket, if one exists at `$PGMANAGER_SOCKET` (default `/run/pgmanager/pgmanager.sock`). This is the "running on the server itself" path — no profile needed.
+6. `pgmanager.yaml` (server-side only).
 
 ### Useful env vars
 
@@ -177,6 +183,8 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 - `PGMANAGER_REQUIRE_TOKEN` — `true` to require auth (default true).
 - `PGMANAGER_ALLOWED_ORIGINS` — comma-separated CORS list.
 - `PGMANAGER_WEB_DIR` — directory for the static admin UI (`-` disables it).
+- `PGMANAGER_SOCKET` — server: local admin socket path. Client: where to look for one (`-` disables the probe).
+- `PGMANAGER_SOCKET_GROUP` — group that owns the admin socket.
 - `PGMANAGER_ENCRYPTION_KEY` — base64 32-byte key for at-rest encryption.
 - `PGMANAGER_DATA_DIR` — where the bootstrap-token file is written.
 - `PGMANAGER_BOOTSTRAP_TOKEN` — operator-supplied initial admin token (skip auto-generation).
@@ -188,13 +196,15 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 ### Layer structure
 
 - `cmd/pgmanager/main.go` — Cobra CLI; resolves a profile, constructs a `client.Client`, and dispatches.
-- `internal/client/` — `Client` interface plus `HTTPClient` (talks to `pgmanager serve`) and `LocalClient` (wraps `project.Manager` for direct-Postgres).
-- `internal/project/project.go` — core business logic. The implementation behind every API handler and the local client.
+- `internal/client/` — `Client` interface plus its one implementation, `HTTPClient`. `NewHTTP` talks to a remote `pgmanager serve`; `NewUnix` dials a local admin socket. Pure transport: it imports no Postgres code at all.
+- `internal/project/project.go` — core business logic. The implementation behind every API handler.
 - `internal/db/postgres.go` — actual `CREATE DATABASE`/`CREATE USER`/`DROP …` operations via pgx.
 - `internal/meta/postgres.go` — metadata persistence (projects, databases, tokens). Encrypts/decrypts DB passwords using the key passed to `NewPostgresStore`. Idempotent schema migration.
 - `internal/meta/store.go` — Store interface; `mock.go` is the in-memory implementation used in tests.
-- `internal/api/` — HTTP server, auth middleware, scoped-token enforcement, audit log.
+- `internal/api/` — HTTP server, auth middleware, scoped-token enforcement, audit log. `setupRoutes` builds the route table twice: once behind bearer-token auth (TCP) and once behind `localAuthMiddleware` (the unix socket, where opening the socket *is* the authorization and the caller gets `admin`). Handlers are shared; they only read the principal out of the request context.
 - `internal/auth/token.go` — token generation, SHA-256 hashing, scope grammar and authorization.
+- `internal/auth/device.go` — device-authorization codes: the secret `device_code` the CLI polls with, and the short human-typed `user_code` (`XXXX-XXXX`, ambiguous characters excluded).
+- `internal/api/device_handlers.go` — the RFC 8628-shaped device flow. `POST /api/auth/device` and `POST /api/auth/device/token` are unauthenticated by design (see `anonymousPaths` in `auth.go`); listing/approving/denying requires the `token` scope.
 - `internal/crypto/aesgcm.go` — AES-256-GCM for at-rest secrets.
 - `internal/config/config.go` — server config (`pgmanager.yaml`) loader.
 - `internal/config/client.go` — client config (`credentials.yaml`) loader + profile resolution.
@@ -210,6 +220,7 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 - Token format: `pgm_live_<32 url-safe bytes>`. Only SHA-256 stored. Display prefix is the first 16 chars.
 - SQL injection prevention everywhere via `pgx.Identifier{}.Sanitize()` and `quoteLiteral` for passwords.
 - DB passwords in metadata are AES-GCM encrypted; the key never lives in the DB.
+- Device authorization: codes live in `pgmanager.device_requests`, expire after 10 minutes, and yield their token exactly once (`ConsumeDeviceToken` reads and clears in a single statement). The issued plaintext is AES-GCM encrypted while it waits to be collected — it is the one secret the server has to hand back in the clear.
 
 ### Scope grammar
 

@@ -162,12 +162,13 @@ func auditLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(rec, r)
+		slot := &auditSlot{}
+		next.ServeHTTP(rec, r.WithContext(contextWithAuditSlot(r.Context(), slot)))
 		dur := time.Since(start)
 
 		prefix := "-"
 		scopes := "-"
-		if info := AuthFromContext(r.Context()); info != nil {
+		if info := slot.info; info != nil {
 			if info.Display != "" {
 				prefix = info.Display
 			}

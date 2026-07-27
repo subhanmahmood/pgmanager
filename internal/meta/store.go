@@ -52,6 +52,44 @@ func (t *Token) Active(now time.Time) bool {
 	return true
 }
 
+// Device authorization request statuses.
+const (
+	DeviceStatusPending  = "pending"
+	DeviceStatusApproved = "approved"
+	DeviceStatusDenied   = "denied"
+)
+
+// DeviceRequest is an in-flight device authorization ("pgmanager login" on a
+// new machine). The CLI holds the device code and polls; an operator approves
+// the matching user code from the admin UI.
+//
+// IssuedToken carries the freshly minted token's plaintext between approval
+// and the CLI's next poll. It is the one secret we must hand back in the
+// clear, so on disk it lives encrypted and it is cleared the moment the CLI
+// collects it.
+type DeviceRequest struct {
+	ID              int64
+	DeviceCodeHash  []byte
+	UserCode        string
+	ClientName      string
+	ClientIP        string
+	RequestedScopes []string
+	Status          string
+	TokenID         *int64
+	IssuedToken     string
+	CreatedAt       time.Time
+	ExpiresAt       time.Time
+	ApprovedBy      string
+	ApprovedAt      *time.Time
+	LastPolledAt    *time.Time
+}
+
+// Expired reports whether the request is past its deadline. An approved
+// request whose token has not been collected expires along with it.
+func (d *DeviceRequest) Expired(now time.Time) bool {
+	return !now.Before(d.ExpiresAt)
+}
+
 // Store defines the interface for metadata storage.
 type Store interface {
 	Close() error
@@ -82,4 +120,17 @@ type Store interface {
 	RevokeToken(ctx context.Context, prefix string) error
 	TouchToken(ctx context.Context, id int64, when time.Time) error
 	HasActiveAdminToken(ctx context.Context) (bool, error)
+
+	// Device authorization operations.
+	CreateDeviceRequest(ctx context.Context, d *DeviceRequest) error
+	GetDeviceRequestByCodeHash(ctx context.Context, hash []byte) (*DeviceRequest, error)
+	GetDeviceRequestByUserCode(ctx context.Context, userCode string) (*DeviceRequest, error)
+	ListPendingDeviceRequests(ctx context.Context) ([]DeviceRequest, error)
+	ApproveDeviceRequest(ctx context.Context, id, tokenID int64, plaintext, approvedBy string) error
+	DenyDeviceRequest(ctx context.Context, id int64, deniedBy string) error
+	// ConsumeDeviceToken returns the issued token's plaintext exactly once and
+	// clears it. An empty string means it was already collected.
+	ConsumeDeviceToken(ctx context.Context, id int64) (string, error)
+	TouchDeviceRequest(ctx context.Context, id int64, when time.Time) error
+	DeleteExpiredDeviceRequests(ctx context.Context) (int, error)
 }

@@ -403,6 +403,9 @@ func (s *Server) cleanup(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, "cleanup", err)
 		return
 	}
+	// Lapsed device authorizations are dead weight too; sweep them here so
+	// the table doesn't grow forever between restarts.
+	s.purgeExpiredDeviceRequests(r.Context())
 	writeJSON(w, http.StatusOK, CleanupResponse{
 		Deleted: deleted,
 		Count:   len(deleted),
@@ -418,13 +421,16 @@ func (s *Server) cleanup(w http.ResponseWriter, r *http.Request) {
 //  1. cfg.Postgres.PublicHost if set (explicit operator config wins)
 //  2. r.Host (port stripped) if available — covers the common case where
 //     Postgres and the API live on the same host and the client already
-//     reached that host. Skipped if r.Host is empty (local mode).
+//     reached that host. Skipped if r.Host is empty (no inbound request).
 //  3. cfg.Postgres.Host (current behaviour, last resort).
 //
 // Port mirrors: PublicPort if set, otherwise cfg.Postgres.Port.
 func (s *Server) publicHostPort(r *http.Request) (string, int) {
 	host := s.cfg.Postgres.PublicHost
-	if host == "" && r != nil && r.Host != "" {
+	// A request over the local socket has no meaningful Host header — the
+	// unix dialer invents one — so fall through to the configured host
+	// instead of handing the caller a hostname that resolves nowhere.
+	if host == "" && r != nil && r.Host != "" && !isSocketRequest(r.Context()) {
 		if h, _, err := net.SplitHostPort(r.Host); err == nil {
 			host = h
 		} else {

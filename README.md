@@ -30,7 +30,8 @@ Or grab a binary from [Releases](https://github.com/subhanmahmood/pgmanager/rele
 
 ```bash
 pgmanager login https://pgm.example.com
-# paste the bootstrap admin token
+#   First copy your one-time code: WXYZ-2468
+#   Press Enter to open https://pgm.example.com/device in your browser...
 
 pgmanager auth whoami           # sanity check
 pgmanager project create myapp
@@ -38,7 +39,32 @@ pgmanager db create myapp dev
 pgmanager db credentials myapp dev   # shows the connection string
 ```
 
+`login` runs a device authorization, the same shape as `gh auth login`: the CLI
+prints a one-time code, you approve it from the admin UI in a browser that is
+already signed in, and this machine receives its own token. No secret is ever
+copy-pasted between machines. Add `--scope project:myapp` to say what you want;
+the approver decides what you actually get.
+
+Two variations:
+
+- `pgmanager login <url> --with-token` — paste an existing token instead. This
+  is the path for CI, and for the bootstrap token on a brand new server (there
+  is nobody to approve the first device yet).
+- `pgmanager login <url> --no-browser` — print the URL instead of opening one.
+  Chosen automatically over SSH.
+
 Profile lives at `~/.config/pgmanager/credentials.yaml` (mode 0600).
+
+To authorize someone else's laptop, have them run `pgmanager login`, then
+approve their code from the Devices view in the admin UI — or from a terminal:
+
+```bash
+pgmanager auth devices                                  # who is waiting
+pgmanager auth approve WXYZ-2468 --scope project:myapp --expires 90d
+pgmanager auth deny WXYZ-2468                           # or turn them away
+```
+
+Codes expire after 10 minutes, and each one yields its token exactly once.
 
 ## Quick start — CI
 
@@ -77,10 +103,34 @@ git clone https://github.com/subhanmahmood/pgmanager.git
 cd pgmanager/examples/deploy
 cp .env.example .env       # then $EDITOR .env
 docker compose up -d
-docker compose exec pgmanager cat /var/lib/pgmanager/bootstrap-token.txt
+docker compose exec pgmanager pgmanager auth whoami   # admin, via the local socket
 ```
 
+Server-side admin needs no token at all — see below. The bootstrap token is
+still written to `/var/lib/pgmanager/bootstrap-token.txt` for signing into the
+admin UI the first time.
+
 Full walkthrough — including TLS, secrets, and the `upgrade.sh` workflow — in [`examples/deploy/README.md`](examples/deploy/README.md).
+
+## Admin from the server itself
+
+Set `api.socket` (`PGMANAGER_SOCKET`) and `pgmanager serve` also listens on a
+unix socket. The CLI on that box finds it with no configuration at all — no
+token on disk, nothing to rotate:
+
+```bash
+pgmanager auth whoami          # local:uid=0,pid=1234 — scopes: admin
+pgmanager auth approve WXYZ-2468 --scope project:myapp
+```
+
+Being able to open the socket *is* the authorization, so it is created mode
+`0660`; set `api.socket_group` to hand access to a group instead of root only.
+Requests still run through the same handlers, scope checks and audit log as
+HTTP ones, and each line records the calling uid/pid. `--socket <path>` targets
+one explicitly; `PGMANAGER_SOCKET=-` disables the probe.
+
+This is what makes the bootstrap token disposable: approve your first laptop
+from the server, then `rm bootstrap-token.txt`.
 
 ## Admin UI
 
@@ -93,6 +143,11 @@ The bundled Deployment serves it on `admin.<your API domain>` (override with
 certificate on first request; both hostnames reach the same process, so the UI
 calls the API same-origin and needs no CORS configuration.
 
+The Devices view is where you approve `pgmanager login` requests: enter the
+one-time code (or follow the `/device?code=…` link the CLI prints), see what is
+asking and from where, then choose the name, scopes and expiry of the token it
+receives. Requested scopes are only a suggestion — what you pick is what it gets.
+
 Sign in by pasting an API token. It is kept in that browser's `localStorage`
 and sent as a bearer token — so it is exactly as privileged as the token you
 paste. Prefer a `project:<name>` token over `admin` where the person only needs
@@ -104,7 +159,7 @@ Set `PGMANAGER_WEB_DIR` (or `api.web_dir`) to serve the UI from elsewhere, or to
 ## CLI commands
 
 ```
-pgmanager login <url>              Save an API token under a profile
+pgmanager login <url>              Authorize this device (--with-token to paste one)
 pgmanager logout [profile]         Remove a profile
 pgmanager profile list|use|show    Manage saved profiles
 pgmanager doctor                   Diagnose: profile, token, server reachability
@@ -112,6 +167,9 @@ pgmanager auth whoami              Show current token + scopes
 pgmanager auth list-tokens         Enumerate tokens (admin/tokens scope)
 pgmanager auth create-token        Mint a scoped token
 pgmanager auth revoke-token <pfx>  Revoke a token by its prefix
+pgmanager auth devices             List devices awaiting authorization
+pgmanager auth approve <code>      Approve a device and mint its token
+pgmanager auth deny <code>         Reject a device
 pgmanager project create|list|delete
 pgmanager db create|list|info|credentials|delete
                                    db create accepts -x/--extension (repeatable)
@@ -155,6 +213,8 @@ The most important environment overrides:
 | `POSTGRES_*` | server | Override `postgres.*` (host, port, user, password, database, sslmode) |
 | `POSTGRES_PUBLIC_HOST` / `POSTGRES_PUBLIC_PORT` | server | What clients see in `db create` / `db info` responses |
 | `PGMANAGER_LISTEN` | server | Bind address (default `127.0.0.1:8080`) |
+| `PGMANAGER_SOCKET` | both | server: local admin socket path. client: where to look for one (`-` disables) |
+| `PGMANAGER_SOCKET_GROUP` | server | Group that owns the admin socket |
 | `PGMANAGER_ENCRYPTION_KEY` | server | base64 32-byte at-rest encryption key |
 | `PGMANAGER_BOOTSTRAP_TOKEN` | server | Pre-seed initial admin token (skip auto-generation) |
 | `PGMANAGER_DATA_DIR` | server | Where `bootstrap-token.txt` is written |
@@ -163,7 +223,10 @@ Full reference in the agent skill ([`.claude/skills/pgmanager/SKILL.md`](.claude
 
 ## REST API
 
-Same surface the CLI talks to. All endpoints under `/api`; everything except `/api/health` requires `Authorization: Bearer pgm_live_...`.
+Same surface the CLI talks to. All endpoints under `/api`; everything requires
+`Authorization: Bearer pgm_live_...` except `/api/health` and the two
+device-authorization entry points (`POST /api/auth/device` and
+`POST /api/auth/device/token`), whose callers by definition have no token yet.
 
 ```bash
 TOKEN=pgm_live_xxx

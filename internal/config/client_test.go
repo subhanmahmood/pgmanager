@@ -17,10 +17,8 @@ func TestClientConfigRoundTrip(t *testing.T) {
 				APIURL: "https://pgm.example.com",
 				Token:  "pgm_live_abc",
 			},
-			"local": {
-				Postgres: &PostgresConfig{
-					Host: "localhost", Port: 5432, User: "postgres", Database: "postgres", SSLMode: "disable",
-				},
+			"server": {
+				Socket: "/run/pgmanager/pgmanager.sock",
 			},
 		},
 	}
@@ -50,8 +48,8 @@ func TestClientConfigRoundTrip(t *testing.T) {
 	if loaded.Profiles["prod"].APIURL != "https://pgm.example.com" {
 		t.Errorf("prod APIURL mismatch")
 	}
-	if loaded.Profiles["local"].Postgres.Port != 5432 {
-		t.Errorf("local port mismatch")
+	if loaded.Profiles["server"].Socket != "/run/pgmanager/pgmanager.sock" {
+		t.Errorf("socket profile mismatch")
 	}
 }
 
@@ -98,8 +96,12 @@ func TestProfileMode(t *testing.T) {
 	if (&Profile{APIURL: "x"}).Mode() != "api" {
 		t.Error("APIURL should be api mode")
 	}
-	if (&Profile{Postgres: &PostgresConfig{}}).Mode() != "local" {
-		t.Error("Postgres should be local mode")
+	if (&Profile{Socket: "/run/pgmanager/pgmanager.sock"}).Mode() != "socket" {
+		t.Error("Socket should be socket mode")
+	}
+	// api_url wins when both are somehow set — getClient relies on this.
+	if (&Profile{APIURL: "x", Socket: "/s.sock"}).Mode() != "api" {
+		t.Error("APIURL should win over Socket")
 	}
 	if (&Profile{}).Mode() != "" {
 		t.Error("empty should be no mode")

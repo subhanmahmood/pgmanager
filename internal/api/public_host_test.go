@@ -160,10 +160,11 @@ func TestPublicHostPort_ListDatabases(t *testing.T) {
 	}
 }
 
-// TestPublicHostPort_LocalMode covers the no-request path: Manager itself
-// must prefer PublicHost when set, so the TUI and LocalClient (which never
-// see an HTTP request) advertise the right endpoint.
-func TestPublicHostPort_LocalMode(t *testing.T) {
+// TestPublicHostPort_NoRequest covers the path with no inbound HTTP request
+// to inspect: Manager itself must prefer PublicHost when set, so callers that
+// never see a request (cleanup, startup work) still advertise the right
+// endpoint.
+func TestPublicHostPort_NoRequest(t *testing.T) {
 	cfg := &config.Config{
 		Postgres: config.PostgresConfig{
 			Host: "postgres", Port: 5432,
@@ -187,12 +188,12 @@ func TestPublicHostPort_LocalMode(t *testing.T) {
 		t.Fatalf("GetDatabase: %v", err)
 	}
 	if info.Host != "pgm.example.com" {
-		t.Errorf("local mode host = %q, want pgm.example.com", info.Host)
+		t.Errorf("no-request host = %q, want pgm.example.com", info.Host)
 	}
 	if info.Port != 6543 {
-		t.Errorf("local mode port = %d, want 6543", info.Port)
+		t.Errorf("no-request port = %d, want 6543", info.Port)
 	}
 	if !strings.Contains(info.ConnString, "@pgm.example.com:6543/") {
-		t.Errorf("local mode conn_string = %q, want @pgm.example.com:6543/", info.ConnString)
+		t.Errorf("no-request conn_string = %q, want @pgm.example.com:6543/", info.ConnString)
 	}
 }

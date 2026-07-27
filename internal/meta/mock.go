@@ -14,9 +14,11 @@ type MockStore struct {
 	projects  map[int64]*Project
 	databases map[int64]*Database
 	tokens    map[int64]*Token
+	devices   map[int64]*DeviceRequest
 	nextPID   int64
 	nextDBID  int64
 	nextTID   int64
+	nextDevID int64
 }
 
 // NewMockStore creates a new mock store for testing.
@@ -25,9 +27,11 @@ func NewMockStore() *MockStore {
 		projects:  make(map[int64]*Project),
 		databases: make(map[int64]*Database),
 		tokens:    make(map[int64]*Token),
+		devices:   make(map[int64]*DeviceRequest),
 		nextPID:   1,
 		nextDBID:  1,
 		nextTID:   1,
+		nextDevID: 1,
 	}
 }
 
@@ -277,6 +281,131 @@ func (s *MockStore) TouchToken(ctx context.Context, id int64, when time.Time) er
 		t.LastUsedAt = &when
 	}
 	return nil
+}
+
+// --- Device authorization operations -----------------------------------------
+
+func (s *MockStore) CreateDeviceRequest(ctx context.Context, d *DeviceRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.devices {
+		if existing.UserCode == d.UserCode {
+			return fmt.Errorf("user code already in use: %s", d.UserCode)
+		}
+	}
+	d.ID = s.nextDevID
+	d.Status = DeviceStatusPending
+	if d.CreatedAt.IsZero() {
+		d.CreatedAt = time.Now()
+	}
+	stored := *d
+	s.devices[d.ID] = &stored
+	s.nextDevID++
+	return nil
+}
+
+func (s *MockStore) GetDeviceRequestByCodeHash(ctx context.Context, hash []byte) (*DeviceRequest, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, d := range s.devices {
+		if bytes.Equal(d.DeviceCodeHash, hash) {
+			out := *d
+			return &out, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *MockStore) GetDeviceRequestByUserCode(ctx context.Context, userCode string) (*DeviceRequest, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, d := range s.devices {
+		if d.UserCode == userCode {
+			out := *d
+			return &out, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *MockStore) ListPendingDeviceRequests(ctx context.Context) ([]DeviceRequest, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	now := time.Now()
+	out := make([]DeviceRequest, 0, len(s.devices))
+	for _, d := range s.devices {
+		if d.Status == DeviceStatusPending && !d.Expired(now) {
+			copied := *d
+			copied.IssuedToken = ""
+			out = append(out, copied)
+		}
+	}
+	return out, nil
+}
+
+func (s *MockStore) ApproveDeviceRequest(ctx context.Context, id, tokenID int64, plaintext, approvedBy string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.devices[id]
+	if !ok || d.Status != DeviceStatusPending {
+		return fmt.Errorf("device request %d is no longer pending", id)
+	}
+	now := time.Now()
+	d.Status = DeviceStatusApproved
+	d.TokenID = &tokenID
+	d.IssuedToken = plaintext
+	d.ApprovedBy = approvedBy
+	d.ApprovedAt = &now
+	return nil
+}
+
+func (s *MockStore) DenyDeviceRequest(ctx context.Context, id int64, deniedBy string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.devices[id]
+	if !ok || d.Status != DeviceStatusPending {
+		return fmt.Errorf("device request %d is no longer pending", id)
+	}
+	now := time.Now()
+	d.Status = DeviceStatusDenied
+	d.ApprovedBy = deniedBy
+	d.ApprovedAt = &now
+	return nil
+}
+
+func (s *MockStore) ConsumeDeviceToken(ctx context.Context, id int64) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.devices[id]
+	if !ok || d.IssuedToken == "" {
+		return "", nil
+	}
+	plain := d.IssuedToken
+	d.IssuedToken = ""
+	return plain, nil
+}
+
+func (s *MockStore) TouchDeviceRequest(ctx context.Context, id int64, when time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d, ok := s.devices[id]; ok {
+		d.LastPolledAt = &when
+	}
+	return nil
+}
+
+func (s *MockStore) DeleteExpiredDeviceRequests(ctx context.Context) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	n := 0
+	for id, d := range s.devices {
+		if d.Expired(now) {
+			delete(s.devices, id)
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (s *MockStore) HasActiveAdminToken(ctx context.Context) (bool, error) {

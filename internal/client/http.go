@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,6 +28,26 @@ func NewHTTP(baseURL, token string) *HTTPClient {
 		token:   token,
 		http: &http.Client{
 			Timeout: 30 * time.Second,
+		},
+	}
+}
+
+// NewUnix creates a client that talks to a `pgmanager serve` listening on a
+// local unix socket. There is no token: reaching the socket at all is the
+// credential, and the server grants admin on that basis.
+func NewUnix(socketPath string) *HTTPClient {
+	return &HTTPClient{
+		// The host in the URL is never resolved — the dialer ignores it — but
+		// net/http still requires a well-formed one.
+		baseURL: "http://pgmanager.local",
+		http: &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var d net.Dialer
+					return d.DialContext(ctx, "unix", socketPath)
+				},
+			},
 		},
 	}
 }

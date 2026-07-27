@@ -26,6 +26,7 @@
             <nav>
                 <button class="tab" data-view="projects">Projects</button>
                 <button class="tab" data-view="tokens">Tokens</button>
+                <button class="tab" data-view="devices">Devices</button>
                 <button class="tab" data-view="maintenance">Maintenance</button>
             </nav>
             <div class="header-right">
@@ -52,6 +53,26 @@
                     <button data-action="new-token">New token</button>
                 </div>
                 <div id="tokensList" class="list"></div>
+            </section>
+
+            <!-- Devices awaiting authorization -->
+            <section class="view" id="view-devices" hidden>
+                <div class="view-header">
+                    <h2>Device authorization</h2>
+                    <button class="ghost" data-action="refresh-devices">Refresh</button>
+                </div>
+                <div class="panel">
+                    <h3>Approve a device</h3>
+                    <p class="muted">Someone ran <code>pgmanager login</code> and it printed a
+                    one-time code. Enter that code to see what is asking for access.</p>
+                    <form class="row" id="formDeviceLookup">
+                        <input type="text" id="deviceCode" placeholder="WXYZ-2468" size="12"
+                               autocomplete="off" spellcheck="false">
+                        <button type="submit">Continue</button>
+                    </form>
+                    <p class="form-error" id="deviceLookupError" hidden></p>
+                </div>
+                <div id="devicesList" class="list"></div>
             </section>
 
             <!-- Maintenance -->
@@ -132,6 +153,30 @@
             <div class="modal-actions">
                 <button type="button" class="ghost" data-close>Cancel</button>
                 <button type="submit">Create</button>
+            </div>
+        </form>
+    </div>
+
+    <!-- Approve a device -->
+    <div class="modal-overlay" id="modal-device" hidden>
+        <form class="modal" id="formDevice">
+            <h3>Approve device</h3>
+            <dl id="deviceDetail"></dl>
+            <p class="warn">This device gets exactly the scopes you choose below —
+            what it asked for is only a suggestion.</p>
+            <label for="deviceTokenName">Token name</label>
+            <input type="text" id="deviceTokenName" autocomplete="off">
+            <label for="deviceScopes">Scopes <span class="muted">(one per line)</span></label>
+            <textarea id="deviceScopes" rows="4" placeholder="project:myapp" spellcheck="false"></textarea>
+            <p class="hint">admin · tokens · project:* · project:&lt;name&gt; ·
+            project:&lt;name&gt;:env:&lt;env&gt; · project:&lt;name&gt;:pr:*</p>
+            <label for="deviceExpires">Expires <span class="muted">(e.g. 90d — blank for never)</span></label>
+            <input type="text" id="deviceExpires" placeholder="90d" autocomplete="off">
+            <p class="form-error" id="deviceError" hidden></p>
+            <div class="modal-actions">
+                <button type="button" class="ghost" data-close>Cancel</button>
+                <button type="button" class="danger" id="deviceDeny">Deny</button>
+                <button type="submit">Approve</button>
             </div>
         </form>
     </div>

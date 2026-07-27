@@ -87,6 +87,26 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_tokens_prefix ON pgmanager.tokens(token_prefix);
+
+	CREATE TABLE IF NOT EXISTS pgmanager.device_requests (
+		id SERIAL PRIMARY KEY,
+		device_code_hash BYTEA UNIQUE NOT NULL,
+		user_code TEXT UNIQUE NOT NULL,
+		client_name TEXT,
+		client_ip TEXT,
+		requested_scopes TEXT[],
+		status TEXT NOT NULL DEFAULT 'pending',
+		token_id INTEGER REFERENCES pgmanager.tokens(id) ON DELETE SET NULL,
+		issued_token_ct BYTEA,
+		created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+		expires_at TIMESTAMPTZ NOT NULL,
+		approved_by TEXT,
+		approved_at TIMESTAMPTZ,
+		last_polled_at TIMESTAMPTZ
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_device_requests_user_code ON pgmanager.device_requests(user_code);
+	CREATE INDEX IF NOT EXISTS idx_device_requests_expires_at ON pgmanager.device_requests(expires_at);
 	`
 	if _, err := s.pool.Exec(ctx, base); err != nil {
 		return err
@@ -487,4 +507,194 @@ func scanTokens(rows pgx.Rows) ([]Token, error) {
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// --- Device authorization operations -----------------------------------------
+
+func derefString(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+const deviceSelect = `SELECT id, device_code_hash, user_code, client_name, client_ip, requested_scopes,
+	status, token_id, issued_token_ct, created_at, expires_at, approved_by, approved_at, last_polled_at
+	FROM pgmanager.device_requests`
+
+func (s *PostgresStore) CreateDeviceRequest(ctx context.Context, d *DeviceRequest) error {
+	var id int64
+	var createdAt time.Time
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO pgmanager.device_requests
+		   (device_code_hash, user_code, client_name, client_ip, requested_scopes, status, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 RETURNING id, created_at`,
+		d.DeviceCodeHash, d.UserCode, d.ClientName, d.ClientIP, d.RequestedScopes,
+		DeviceStatusPending, d.ExpiresAt,
+	).Scan(&id, &createdAt)
+	if err != nil {
+		return fmt.Errorf("create device request: %w", err)
+	}
+	d.ID = id
+	d.CreatedAt = createdAt
+	d.Status = DeviceStatusPending
+	return nil
+}
+
+func (s *PostgresStore) GetDeviceRequestByCodeHash(ctx context.Context, hash []byte) (*DeviceRequest, error) {
+	return s.scanOneDeviceRequest(ctx, deviceSelect+" WHERE device_code_hash = $1", hash)
+}
+
+func (s *PostgresStore) GetDeviceRequestByUserCode(ctx context.Context, userCode string) (*DeviceRequest, error) {
+	return s.scanOneDeviceRequest(ctx, deviceSelect+" WHERE user_code = $1", userCode)
+}
+
+func (s *PostgresStore) ListPendingDeviceRequests(ctx context.Context) ([]DeviceRequest, error) {
+	rows, err := s.pool.Query(ctx,
+		deviceSelect+" WHERE status = $1 AND expires_at > NOW() ORDER BY id DESC",
+		DeviceStatusPending)
+	if err != nil {
+		return nil, fmt.Errorf("list device requests: %w", err)
+	}
+	defer rows.Close()
+
+	var out []DeviceRequest
+	for rows.Next() {
+		d, err := s.scanDeviceRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		// Pending requests never carry a token; don't decrypt anything here.
+		d.IssuedToken = ""
+		out = append(out, *d)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) ApproveDeviceRequest(ctx context.Context, id, tokenID int64, plaintext, approvedBy string) error {
+	if s.key == nil {
+		return ErrEncryptionKeyRequired
+	}
+	ct, err := crypto.Encrypt(s.key, []byte(plaintext))
+	if err != nil {
+		return fmt.Errorf("encrypt issued token: %w", err)
+	}
+	// The status guard makes approval single-shot: a second approver racing
+	// the first affects no rows rather than overwriting the issued token.
+	result, err := s.pool.Exec(ctx,
+		`UPDATE pgmanager.device_requests
+		 SET status = $1, token_id = $2, issued_token_ct = $3, approved_by = $4, approved_at = NOW()
+		 WHERE id = $5 AND status = $6`,
+		DeviceStatusApproved, tokenID, ct, approvedBy, id, DeviceStatusPending,
+	)
+	if err != nil {
+		return fmt.Errorf("approve device request: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("device request %d is no longer pending", id)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DenyDeviceRequest(ctx context.Context, id int64, deniedBy string) error {
+	result, err := s.pool.Exec(ctx,
+		`UPDATE pgmanager.device_requests
+		 SET status = $1, approved_by = $2, approved_at = NOW()
+		 WHERE id = $3 AND status = $4`,
+		DeviceStatusDenied, deniedBy, id, DeviceStatusPending,
+	)
+	if err != nil {
+		return fmt.Errorf("deny device request: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("device request %d is no longer pending", id)
+	}
+	return nil
+}
+
+func (s *PostgresStore) ConsumeDeviceToken(ctx context.Context, id int64) (string, error) {
+	if s.key == nil {
+		return "", ErrEncryptionKeyRequired
+	}
+	// Read-and-clear in one statement so two concurrent polls can never both
+	// walk away with the token. A plain UPDATE ... RETURNING would hand back
+	// the post-update value (NULL), hence the CTE holding the old ciphertext.
+	var ct []byte
+	err := s.pool.QueryRow(ctx,
+		`WITH claimed AS (
+		     SELECT id, issued_token_ct FROM pgmanager.device_requests
+		     WHERE id = $1 AND issued_token_ct IS NOT NULL
+		     FOR UPDATE
+		 ), cleared AS (
+		     UPDATE pgmanager.device_requests d SET issued_token_ct = NULL
+		     FROM claimed WHERE d.id = claimed.id
+		 )
+		 SELECT issued_token_ct FROM claimed`, id).Scan(&ct)
+	if err == pgx.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("consume device token: %w", err)
+	}
+	plain, err := crypto.Decrypt(s.key, ct)
+	if err != nil {
+		return "", fmt.Errorf("decrypt issued token: %w", err)
+	}
+	return string(plain), nil
+}
+
+func (s *PostgresStore) TouchDeviceRequest(ctx context.Context, id int64, when time.Time) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE pgmanager.device_requests SET last_polled_at = $1 WHERE id = $2`, when, id)
+	return err
+}
+
+func (s *PostgresStore) DeleteExpiredDeviceRequests(ctx context.Context) (int, error) {
+	result, err := s.pool.Exec(ctx, `DELETE FROM pgmanager.device_requests WHERE expires_at < NOW()`)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired device requests: %w", err)
+	}
+	return int(result.RowsAffected()), nil
+}
+
+func (s *PostgresStore) scanOneDeviceRequest(ctx context.Context, query string, args ...interface{}) (*DeviceRequest, error) {
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query device request: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	d, err := s.scanDeviceRow(rows)
+	if err != nil {
+		return nil, err
+	}
+	return d, rows.Err()
+}
+
+func (s *PostgresStore) scanDeviceRow(rows pgx.Rows) (*DeviceRequest, error) {
+	var d DeviceRequest
+	var ct []byte
+	var clientName, clientIP, approvedBy *string
+	if err := rows.Scan(&d.ID, &d.DeviceCodeHash, &d.UserCode, &clientName, &clientIP,
+		&d.RequestedScopes, &d.Status, &d.TokenID, &ct, &d.CreatedAt, &d.ExpiresAt,
+		&approvedBy, &d.ApprovedAt, &d.LastPolledAt); err != nil {
+		return nil, fmt.Errorf("scan device request: %w", err)
+	}
+	d.ClientName = derefString(clientName)
+	d.ClientIP = derefString(clientIP)
+	d.ApprovedBy = derefString(approvedBy)
+	if len(ct) > 0 {
+		if s.key == nil {
+			return nil, ErrEncryptionKeyRequired
+		}
+		plain, err := crypto.Decrypt(s.key, ct)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt issued token: %w", err)
+		}
+		d.IssuedToken = string(plain)
+	}
+	return &d, nil
 }

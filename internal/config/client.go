@@ -20,25 +20,48 @@ type ClientConfig struct {
 	Profiles map[string]*Profile `yaml:"profiles"`
 }
 
-// Profile describes one connection target. Exactly one of APIURL (talk to a
-// remote `pgmanager serve`) or Postgres (talk directly to Postgres) should be
-// set. APIURL takes precedence if both happen to be present.
+// Profile describes one connection target: either APIURL (a remote
+// `pgmanager serve` over HTTPS) or Socket (a local one over a unix socket).
+// APIURL takes precedence if both happen to be present.
 type Profile struct {
-	APIURL   string          `yaml:"api_url,omitempty"`
-	Token    string          `yaml:"token,omitempty"`
-	Postgres *PostgresConfig `yaml:"postgres,omitempty"`
-	Crypto   *CryptoConfig   `yaml:"crypto,omitempty"`
+	APIURL string `yaml:"api_url,omitempty"`
+	Token  string `yaml:"token,omitempty"`
+	Socket string `yaml:"socket,omitempty"`
 }
 
-// Mode returns "api" or "local" depending on how the profile is wired.
+// Mode returns how the profile reaches pgmanager: "api" (remote HTTP) or
+// "socket" (local unix socket on the server itself).
 func (p *Profile) Mode() string {
 	if p.APIURL != "" {
 		return "api"
 	}
-	if p.Postgres != nil {
-		return "local"
+	if p.Socket != "" {
+		return "socket"
 	}
 	return ""
+}
+
+// DefaultSocketPath is where `pgmanager serve` is conventionally told to put
+// its local admin socket, and therefore where the CLI looks when no profile
+// is configured. Matches examples/deploy.
+const DefaultSocketPath = "/run/pgmanager/pgmanager.sock"
+
+// LocalSocketPath returns the socket the CLI should try when nothing else is
+// configured, and whether one is actually there. $PGMANAGER_SOCKET overrides
+// the default; "-" disables the probe entirely.
+func LocalSocketPath() (string, bool) {
+	path := os.Getenv("PGMANAGER_SOCKET")
+	if path == "-" {
+		return "", false
+	}
+	if path == "" {
+		path = DefaultSocketPath
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		return path, false
+	}
+	return path, true
 }
 
 // ClientConfigPath returns the canonical location of the client credentials
