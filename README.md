@@ -53,7 +53,9 @@ Two variations:
 - `pgmanager login <url> --no-browser` — print the URL instead of opening one.
   Chosen automatically over SSH.
 
-Profile lives at `~/.config/pgmanager/credentials.yaml` (mode 0600).
+Profile lives at `~/.config/pgmanager/credentials.yaml` (mode 0600). On macOS the
+token itself goes in the Keychain instead of that file — see
+[Configuration](#configuration).
 
 To authorize someone else's laptop, have them run `pgmanager login`, then
 approve their code from the Devices view in the admin UI — or from a terminal:
@@ -235,6 +237,13 @@ Two config files; they serve different audiences and never mix.
 
 **`credentials.yaml`** (client) — `~/.config/pgmanager/credentials.yaml`, mode 0600. Holds named profiles managed via `login` / `logout` / `profile use`.
 
+On macOS the bearer token is stored in the **Keychain** (service `pgmanager`,
+account = profile name) and the file records only `token_source: keyring`. On
+other platforms it stays in the file, which is why an existing plaintext
+`token:` is always still honoured; `pgmanager auth migrate-keychain` moves those
+over, and `PGMANAGER_NO_KEYRING=1` opts out. CI is unaffected — it uses the
+environment variables below and never reads either store.
+
 **`pgmanager.yaml`** (server) — read only by `pgmanager serve`. Auto-discovered in `cwd → ~ → ~/.config/pgmanager/ → /etc/pgmanager/`.
 
 The most important environment overrides:
@@ -243,6 +252,7 @@ The most important environment overrides:
 |---|---|---|
 | `PGMANAGER_API_URL` + `PGMANAGER_API_TOKEN` | client | Synthesize an `env` profile; bypasses `credentials.yaml` (CI path) |
 | `PGMANAGER_PROFILE` | client | Pick a saved profile by name |
+| `PGMANAGER_NO_KEYRING` | client | Keep tokens in `credentials.yaml` instead of the macOS Keychain |
 | `POSTGRES_*` | server | Override `postgres.*` (host, port, user, password, database, sslmode) |
 | `POSTGRES_PUBLIC_HOST` / `POSTGRES_PUBLIC_PORT` | server | What clients see in `db create` / `db info` responses |
 | `PGMANAGER_LISTEN` | server | Bind address (default `127.0.0.1:8080`) |

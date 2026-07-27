@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -124,7 +125,10 @@ func getClient() (*client.HTTPClient, string, error) {
 		return client.NewUnix(profile.Socket), name, nil
 	}
 	if profile.APIURL != "" {
-		token := profile.Token
+		token, err := profile.Token(name)
+		if err != nil {
+			return nil, name, err
+		}
 		if env := os.Getenv("PGMANAGER_API_TOKEN"); env != "" {
 			token = env
 		}
@@ -531,7 +535,11 @@ func newLoginCmd() *cobra.Command {
 				return fmt.Errorf("login failed: %w", err)
 			}
 
-			cfg.Profiles[name] = &config.Profile{APIURL: apiURL, Token: token}
+			p := &config.Profile{APIURL: apiURL}
+			if err := p.SetToken(name, token); err != nil {
+				return err
+			}
+			cfg.Profiles[name] = p
 			cfg.Current = name
 			path, err := config.SaveClient(cfg)
 			if err != nil {
@@ -539,6 +547,10 @@ func newLoginCmd() *cobra.Command {
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Saved profile %q (token prefix %s, scopes %s) to %s\n",
 				name, who.TokenPrefix, strings.Join(who.Scopes, ","), path)
+			if p.TokenSource == config.TokenSourceKeyring {
+				fmt.Fprintf(cmd.OutOrStdout(), "Token stored in the macOS Keychain (service %q, account %q).\n",
+					config.KeyringService, name)
+			}
 			return nil
 		},
 	}
@@ -640,8 +652,15 @@ func newLogoutCmd() *cobra.Command {
 			if len(args) == 1 {
 				name = args[0]
 			}
-			if _, ok := clientCfg.Profiles[name]; !ok {
+			p, ok := clientCfg.Profiles[name]
+			if !ok {
 				return fmt.Errorf("profile %q not found", name)
+			}
+			// Drop the secret before the profile: once the profile is gone we
+			// no longer know the token was in the keychain, and it would sit
+			// there indefinitely with nothing referencing it.
+			if err := p.ClearToken(name); err != nil {
+				return err
 			}
 			delete(clientCfg.Profiles, name)
 			if clientCfg.Current == name {
@@ -734,7 +753,8 @@ func newProfileCmd() *cobra.Command {
 				}
 				if p.APIURL != "" {
 					view["api_url"] = p.APIURL
-					view["token_set"] = p.Token != ""
+					view["token_set"] = p.HasToken(name)
+					view["token_store"] = tokenStore(p)
 				}
 				if p.Socket != "" {
 					view["socket"] = p.Socket
@@ -742,7 +762,8 @@ func newProfileCmd() *cobra.Command {
 				return emit(view, func() {
 					fmt.Printf("name:       %s\nmode:       %s\n", name, p.Mode())
 					if p.APIURL != "" {
-						fmt.Printf("api_url:    %s\ntoken_set:  %v\n", p.APIURL, p.Token != "")
+						fmt.Printf("api_url:    %s\ntoken_set:  %v\ntoken_store: %s\n",
+							p.APIURL, p.HasToken(name), tokenStore(p))
 					}
 					if p.Socket != "" {
 						fmt.Printf("socket:     %s\n", p.Socket)
@@ -952,7 +973,61 @@ func newAuthCmd() *cobra.Command {
 		},
 	})
 
+	cmd.AddCommand(&cobra.Command{
+		Use:   "migrate-keychain",
+		Short: "Move plaintext tokens from credentials.yaml into the OS keychain",
+		Long: "Move plaintext tokens from credentials.yaml into the OS keychain.\n\n" +
+			"New logins already store their token there. This is for profiles saved\n" +
+			"before that, which still have the token sitting in the file.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !config.KeyringAvailable() {
+				return fmt.Errorf("no OS keychain on this platform; tokens stay in %s", clientCfgPath)
+			}
+			if clientCfg == nil || len(clientCfg.Profiles) == 0 {
+				return fmt.Errorf("no profiles configured")
+			}
+			moved := []string{}
+			for name, p := range clientCfg.Profiles {
+				if p.TokenValue == "" {
+					continue
+				}
+				if err := p.SetToken(name, p.TokenValue); err != nil {
+					return fmt.Errorf("profile %q: %w", name, err)
+				}
+				moved = append(moved, name)
+			}
+			sort.Strings(moved)
+			if len(moved) == 0 {
+				return emit(map[string]interface{}{"migrated": moved}, func() {
+					fmt.Println("Nothing to migrate — no profile has a plaintext token.")
+				})
+			}
+			// Only now rewrite the file. If the keychain write failed above we
+			// returned without touching it, so the token is never removed from
+			// the file until a copy is safely stored.
+			path, err := config.SaveClient(clientCfg)
+			if err != nil {
+				return err
+			}
+			return emit(map[string]interface{}{"migrated": moved, "path": path}, func() {
+				fmt.Printf("Moved %d token(s) into the keychain: %s\n", len(moved), strings.Join(moved, ", "))
+				fmt.Printf("Removed from %s\n", path)
+			})
+		},
+	})
+
 	return cmd
+}
+
+// tokenStore names where a profile's bearer token is kept, for status output.
+func tokenStore(p *config.Profile) string {
+	if p.TokenSource == config.TokenSourceKeyring {
+		return "keychain"
+	}
+	if p.TokenValue != "" {
+		return "file"
+	}
+	return "none"
 }
 
 // --- users ------------------------------------------------------------------
@@ -1194,7 +1269,8 @@ func newDoctorCmd() *cobra.Command {
 			report["mode"] = p.Mode()
 			if p.APIURL != "" {
 				report["api_url"] = p.APIURL
-				report["token_set"] = p.Token != ""
+				report["token_set"] = p.HasToken(name)
+				report["token_store"] = tokenStore(p)
 			}
 			c, _, err := getClient()
 			if err != nil {

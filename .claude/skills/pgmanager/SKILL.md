@@ -486,16 +486,23 @@ current: prod
 profiles:
   prod:
     api_url: https://pgm.example.com
-    token: pgm_live_xxxxxxxxxxxxxxxx
+    token_source: keyring    # macOS: secret is in the Keychain, not here
   staging:
     api_url: https://pgm-staging.example.com
-    token: pgm_live_yyyyyyyyyyyyyyyy
+    token: pgm_live_yyyyyyyyyyyyyyyy   # non-macOS, or a pre-keychain profile
   server:
     socket: /run/pgmanager/pgmanager.sock
 ```
 
-A profile sets either `api_url` (+ `token`) or `socket` — never Postgres
-credentials. On the server itself you usually need no profile at all: the CLI
+A profile sets either `api_url` (+ a token) or `socket` — never Postgres
+credentials.
+
+**Token storage.** On macOS `login` puts the token in the Keychain (service
+`pgmanager`, account = profile name) and writes `token_source: keyring` here;
+elsewhere it stays in this file at 0600. A plaintext `token:` is always read, so
+older profiles keep working — `pgmanager auth migrate-keychain` moves them, and
+`logout` deletes the Keychain entry. `profile show` and `doctor` report which
+store is in use as `token_store`. On the server itself you usually need no profile at all: the CLI
 probes `$PGMANAGER_SOCKET` (default `/run/pgmanager/pgmanager.sock`) when no
 profile is configured.
 
@@ -506,6 +513,7 @@ profile is configured.
 | `PGMANAGER_API_URL` / `PGMANAGER_API_TOKEN` | Synthesize an `env` profile; bypasses the file (CI path) |
 | `PGMANAGER_PROFILE` | Pick a saved profile by name |
 | `PGMANAGER_CONFIG_DIR` / `XDG_CONFIG_HOME` | Override credentials.yaml location |
+| `PGMANAGER_NO_KEYRING` | Keep tokens in credentials.yaml instead of the macOS Keychain |
 | `PGMANAGER_SOCKET` | Local admin socket to use, when standing on the server (`-` disables the probe) |
 
 (Server-side env vars — `POSTGRES_*`, `PGMANAGER_LISTEN`, `PGMANAGER_ENCRYPTION_KEY`, etc. — are in the `pgmanager-server` skill.)

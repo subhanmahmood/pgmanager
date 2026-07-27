@@ -14,8 +14,8 @@ func TestClientConfigRoundTrip(t *testing.T) {
 		Current: "prod",
 		Profiles: map[string]*Profile{
 			"prod": {
-				APIURL: "https://pgm.example.com",
-				Token:  "pgm_live_abc",
+				APIURL:     "https://pgm.example.com",
+				TokenValue: "pgm_live_abc",
 			},
 			"server": {
 				Socket: "/run/pgmanager/pgmanager.sock",
@@ -80,8 +80,13 @@ func TestResolveProfile(t *testing.T) {
 		t.Setenv("PGMANAGER_API_TOKEN", "tok")
 		t.Setenv("PGMANAGER_PROFILE", "")
 		name, p, err := ResolveProfile(cfg, "")
-		if err != nil || name != "env" || p.APIURL != "https://ci" || p.Token != "tok" {
+		if err != nil || name != "env" || p.APIURL != "https://ci" {
 			t.Fatalf("got name=%q profile=%+v err=%v", name, p, err)
+		}
+		// The env profile must never be keychain-backed — CI has no keychain.
+		tok, err := p.Token(name)
+		if err != nil || tok != "tok" {
+			t.Fatalf("env token: got %q err=%v, want \"tok\"", tok, err)
 		}
 	})
 	t.Run("missing", func(t *testing.T) {
