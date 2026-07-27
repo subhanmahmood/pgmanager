@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -23,11 +26,12 @@ import (
 
 // Server represents the HTTP API server.
 type Server struct {
-	cfg    *config.Config
-	mgr    *project.Manager
-	store  meta.Store
-	addr   string
-	router *chi.Mux
+	cfg          *config.Config
+	mgr          *project.Manager
+	store        meta.Store
+	addr         string
+	router       *chi.Mux
+	socketRouter *chi.Mux
 }
 
 // NewServer creates a new API server. The store is used for token lookup and
@@ -37,11 +41,16 @@ func NewServer(cfg *config.Config, mgr *project.Manager, store meta.Store, addr 
 		addr = cfg.API.BindAddress()
 	}
 	s := &Server{cfg: cfg, mgr: mgr, store: store, addr: addr}
-	s.setupRoutes()
+	s.router = s.buildRouter(s.authMiddleware)
+	s.socketRouter = s.buildRouter(s.localAuthMiddleware)
 	return s
 }
 
-func (s *Server) setupRoutes() {
+// buildRouter wires the full route table behind the supplied authentication
+// middleware. The TCP listener gets bearer-token auth; the unix socket gets
+// peer-credential auth. The handlers themselves are identical — they only
+// ever read the principal back out of the request context.
+func (s *Server) buildRouter(authMW func(http.Handler) http.Handler) *chi.Mux {
 	r := chi.NewRouter()
 
 	r.Use(middleware.Recoverer)
@@ -64,13 +73,22 @@ func (s *Server) setupRoutes() {
 	r.Get("/api/health", s.healthHandler)
 
 	r.Route("/api", func(r chi.Router) {
-		r.Use(s.authMiddleware)
+		r.Use(authMW)
 
 		// Auth/token management.
 		r.Get("/auth/whoami", s.whoami)
 		r.Get("/auth/tokens", s.listTokens)
 		r.Post("/auth/tokens", s.createToken)
 		r.Delete("/auth/tokens/{prefix}", s.revokeToken)
+
+		// Device authorization. The first two are reached before the caller
+		// has any credentials — see the bypass in authMiddleware.
+		r.Post("/auth/device", s.startDeviceAuth)
+		r.Post("/auth/device/token", s.pollDeviceAuth)
+		r.Get("/auth/devices", s.listDeviceRequests)
+		r.Get("/auth/device/{user_code}", s.getDeviceRequest)
+		r.Post("/auth/device/{user_code}/approve", s.approveDeviceRequest)
+		r.Post("/auth/device/{user_code}/deny", s.denyDeviceRequest)
 
 		// Projects.
 		r.Get("/projects", s.listProjects)
@@ -92,7 +110,7 @@ func (s *Server) setupRoutes() {
 		r.Handle("/*", staticHandler(webDir))
 	}
 
-	s.router = r
+	return r
 }
 
 // webDir resolves the directory to serve the admin UI from. Empty means
@@ -151,6 +169,9 @@ func (s *Server) Start() error {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 
+	// Requests nobody ever completed are just noise; clear them at boot.
+	s.purgeExpiredDeviceRequests(context.Background())
+
 	srv := &http.Server{
 		Addr:         s.addr,
 		Handler:      s.router,
@@ -160,6 +181,13 @@ func (s *Server) Start() error {
 	}
 
 	serverErrors := make(chan error, 1)
+
+	sockSrv, cleanupSocket, err := s.startSocketServer(serverErrors)
+	if err != nil {
+		return err
+	}
+	defer cleanupSocket()
+
 	go func() {
 		log.Printf("API server listening on %s", s.addr)
 		if strings.HasPrefix(s.addr, "127.") || strings.HasPrefix(s.addr, "localhost") {
@@ -178,12 +206,85 @@ func (s *Server) Start() error {
 		log.Printf("Received %v signal, initiating graceful shutdown...", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		if sockSrv != nil {
+			_ = sockSrv.Shutdown(ctx)
+		}
 		if err := srv.Shutdown(ctx); err != nil {
 			srv.Close()
 			return fmt.Errorf("could not stop server gracefully: %w", err)
 		}
 	}
 	return nil
+}
+
+// startSocketServer brings up the local admin listener when api.socket is
+// configured. Callers on the other end of this socket are trusted on the
+// strength of filesystem permissions alone — there is no token — so the
+// socket is created 0660 and, where configured, owned by a dedicated group.
+//
+// Returns a nil server (and a no-op cleanup) when no socket is configured.
+func (s *Server) startSocketServer(serverErrors chan<- error) (*http.Server, func(), error) {
+	path := s.cfg.API.Socket
+	if path == "" {
+		return nil, func() {}, nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, nil, fmt.Errorf("socket directory: %w", err)
+	}
+	// A leftover socket from an unclean shutdown would otherwise make bind
+	// fail with EADDRINUSE forever.
+	if info, err := os.Stat(path); err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return nil, nil, fmt.Errorf("refusing to replace %s: not a socket", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, nil, fmt.Errorf("remove stale socket %s: %w", path, err)
+		}
+	}
+
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen on %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o660); err != nil {
+		ln.Close()
+		return nil, nil, fmt.Errorf("chmod %s: %w", path, err)
+	}
+	if group := s.cfg.API.SocketGroup; group != "" {
+		if err := chownToGroup(path, group); err != nil {
+			ln.Close()
+			return nil, nil, fmt.Errorf("chown %s to group %q: %w", path, group, err)
+		}
+	}
+
+	sockSrv := &http.Server{
+		Handler:     s.socketRouter,
+		IdleTimeout: 60 * time.Second,
+		ConnContext: withPeerCred,
+	}
+	go func() {
+		log.Printf("Local admin socket listening on %s (mode 0660) — callers are trusted as admin", path)
+		if err := sockSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErrors <- fmt.Errorf("socket server: %w", err)
+		}
+	}()
+
+	return sockSrv, func() { _ = os.Remove(path) }, nil
+}
+
+// chownToGroup sets the socket's group so members can talk to pgmanager
+// without being root.
+func chownToGroup(path, group string) error {
+	g, err := user.LookupGroup(group)
+	if err != nil {
+		return err
+	}
+	gid, err := strconv.Atoi(g.Gid)
+	if err != nil {
+		return fmt.Errorf("parse gid %q: %w", g.Gid, err)
+	}
+	return os.Chown(path, -1, gid)
 }
 
 // bootstrap runs once at startup: validates auth config, ensures at least one

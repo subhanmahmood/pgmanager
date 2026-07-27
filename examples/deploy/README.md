@@ -43,13 +43,24 @@ docker compose up -d
 
 Caddy fetches a TLS certificate automatically on first request. Postgres and pgmanager start; pgmanager runs its DB migration and writes a bootstrap admin token.
 
-## 4. Grab the bootstrap admin token
+## 4. Check admin access from the server
+
+The container listens on a local admin socket, so the CLI inside it is admin
+without any token — being able to open the socket is the authorization:
+
+```bash
+docker compose exec pgmanager pgmanager auth whoami
+# token: local:uid=0,pid=42
+# scopes: admin
+```
+
+The bootstrap token is only needed to sign into the browser admin UI:
 
 ```bash
 docker compose exec pgmanager cat /var/lib/pgmanager/bootstrap-token.txt
 ```
 
-Copy the value. On the same machine, immediately delete the file to keep the secret out of disk-level snapshots:
+Copy the value, then delete the file to keep the secret out of disk-level snapshots:
 
 ```bash
 docker compose exec pgmanager rm /var/lib/pgmanager/bootstrap-token.txt
@@ -59,12 +70,26 @@ docker compose exec pgmanager rm /var/lib/pgmanager/bootstrap-token.txt
 
 ```bash
 pgmanager login https://pgm.example.com
-# paste the bootstrap token
+#   First copy your one-time code: WXYZ-2468
+```
 
+Approve it from the server (or from the Devices view in the admin UI):
+
+```bash
+docker compose exec pgmanager pgmanager auth approve WXYZ-2468 --scope admin
+```
+
+Back on the laptop, `login` unblocks and saves the profile:
+
+```bash
 pgmanager auth whoami
 # token: pgm_live_xxxxxxxx
 # scopes: admin
 ```
+
+No secret was copy-pasted between the two machines. `pgmanager login
+https://pgm.example.com --with-token` still works if you'd rather paste the
+bootstrap token directly.
 
 You're done. To create a project-scoped token for CI:
 

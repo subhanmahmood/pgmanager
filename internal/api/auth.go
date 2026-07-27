@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -22,7 +23,22 @@ type AuthInfo struct {
 	Scopes  []string
 }
 
+// auditSlot is a mutable box the audit middleware puts in the request context
+// before authentication runs. Auth middleware sits *inside* audit middleware,
+// so the context it derives is invisible to the outer frame — without this
+// hand-back, every audit line would say the request was anonymous.
+type auditSlot struct{ info *AuthInfo }
+
+type auditSlotKey struct{}
+
+func contextWithAuditSlot(ctx context.Context, slot *auditSlot) context.Context {
+	return context.WithValue(ctx, auditSlotKey{}, slot)
+}
+
 func contextWithAuth(ctx context.Context, info *AuthInfo) context.Context {
+	if slot, ok := ctx.Value(auditSlotKey{}).(*auditSlot); ok {
+		slot.info = info
+	}
 	return context.WithValue(ctx, authInfoKey{}, info)
 }
 
@@ -35,12 +51,39 @@ func AuthFromContext(ctx context.Context) *AuthInfo {
 	return nil
 }
 
+// peerCredKey is the context key carrying the unix-socket peer identity.
+type peerCredKey struct{}
+
+// withPeerCred is the http.Server ConnContext hook for the socket listener.
+// It stashes the peer's identity so localAuthMiddleware can name it in the
+// audit log.
+func withPeerCred(ctx context.Context, c net.Conn) context.Context {
+	return context.WithValue(ctx, peerCredKey{}, peerIdentity(c))
+}
+
+func peerCredFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(peerCredKey{}).(string); ok && v != "" {
+		return v
+	}
+	return "local"
+}
+
+// anonymousPaths are reachable without any credential. The device-flow start
+// and poll endpoints are here because their whole purpose is to serve callers
+// who do not have a token yet; the device code itself is the secret.
+var anonymousPaths = map[string]bool{
+	"/api/health":            true,
+	"/api/auth/device":       true,
+	"/api/auth/device/token": true,
+}
+
 // authMiddleware validates the Bearer token and attaches AuthInfo to the
-// request context. Health checks pass through unauthenticated.
+// request context. Health checks and the device-flow entry points pass
+// through unauthenticated.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	var legacyWarnOnce sync.Once
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/health" {
+		if anonymousPaths[r.URL.Path] {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -88,6 +131,21 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			TokenID: tok.ID,
 			Display: tok.TokenPrefix,
 			Scopes:  tok.Scopes,
+		})
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// localAuthMiddleware authenticates requests arriving over the local unix
+// socket. Reaching this listener at all means the caller already satisfied
+// the socket's file permissions, which is the authorization decision — so
+// they are granted admin without presenting a token. The peer's uid/pid is
+// recorded so the audit log still says who did what.
+func (s *Server) localAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := contextWithAuth(r.Context(), &AuthInfo{
+			Display: peerCredFromContext(r.Context()),
+			Scopes:  []string{auth.ScopeAdmin},
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

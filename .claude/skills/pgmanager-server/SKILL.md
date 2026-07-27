@@ -38,7 +38,11 @@ $EDITOR .env
 
 docker compose up -d
 
-# Grab the bootstrap admin token (printed once)
+# Admin from inside the container needs no token — the local socket is the
+# credential (see "Server-side admin access" below).
+docker compose exec pgmanager pgmanager auth whoami
+
+# The bootstrap token is only needed to sign into the browser admin UI.
 docker compose exec pgmanager cat /var/lib/pgmanager/bootstrap-token.txt
 docker compose exec pgmanager rm /var/lib/pgmanager/bootstrap-token.txt
 ```
@@ -220,6 +224,47 @@ docker compose logs -f pgmanager | grep audit
 
 Pair with `pgmanager auth list-tokens` to map token prefixes to names.
 
+## Server-side admin access (the local socket)
+
+`api.socket` / `PGMANAGER_SOCKET` makes `pgmanager serve` listen on a unix
+socket in addition to TCP. The CLI on that box discovers it automatically — no
+profile, no token, nothing on disk to rotate:
+
+```bash
+docker compose exec pgmanager pgmanager auth whoami
+# token: local:uid=0,pid=42
+# scopes: admin
+```
+
+Being able to open the socket **is** the authorization, so it is created mode
+`0660` and lives inside the container by default. Set `api.socket_group` to
+grant a group access instead of root only. Requests still go through the same
+handlers, scope checks and audit log; each line names the calling uid/pid, so
+"who ran this" survives.
+
+Use `--socket <path>` to target one explicitly, or `PGMANAGER_SOCKET=-` to stop
+the CLI probing for one.
+
+## Use Case — Authorize a teammate's laptop
+
+They run `pgmanager login https://pgm.example.com` and read you the one-time
+code it prints. The code is worthless without your approval and expires in 10
+minutes, so it is safe to send over chat.
+
+```bash
+docker compose exec pgmanager pgmanager auth devices
+# CODE         CLIENT           IP            REQUESTED SCOPES
+# WXYZ-2468    alices-laptop    203.0.113.9   project:myapp
+
+docker compose exec pgmanager pgmanager auth approve WXYZ-2468 \
+  --scope project:myapp --expires 90d
+```
+
+Their CLI picks the token up on its next poll and saves it. Check the client
+name and IP look right before approving — and grant the narrowest scope that
+does the job; what they *requested* is only a suggestion.
+`pgmanager auth deny WXYZ-2468` turns down anything you don't recognise.
+
 ## Use Case 5 — Lost the admin token
 
 If no admin token works anymore (lost, revoked, expired all):
@@ -245,6 +290,10 @@ sudo docker exec postgres psql -U postgres <<'SQL'
 \dt pgmanager.*
 SELECT name, scopes, revoked_at, expires_at FROM pgmanager.tokens ORDER BY created_at DESC;
 SELECT project, env, pr_number, created_at, expires_at FROM pgmanager.databases ORDER BY created_at DESC LIMIT 20;
+-- In-flight `pgmanager login` attempts. Rows expire after 10 minutes and are
+-- purged at startup and on `pgmanager cleanup`.
+SELECT user_code, client_name, client_ip, status, approved_by, expires_at
+  FROM pgmanager.device_requests ORDER BY created_at DESC LIMIT 20;
 SQL
 ```
 
@@ -274,6 +323,8 @@ api:
   listen: 127.0.0.1:8080  # bind address; put Caddy in front for TLS
   require_token: true     # refuse to start without auth
   allowed_origins: []     # CORS list; usually empty
+  socket: ""              # local admin socket; opening it grants admin (mode 0660)
+  socket_group: ""        # optional group to own the socket
 crypto:
   key: ""                 # 32-byte base64; or use key_file, or env
   # key_file: /run/secrets/pgmanager_key
@@ -293,6 +344,8 @@ cleanup:
 | `PGMANAGER_API_PORT` | Legacy; only used if `PGMANAGER_LISTEN` unset |
 | `PGMANAGER_REQUIRE_TOKEN` | `true` (default) to require auth |
 | `PGMANAGER_ALLOWED_ORIGINS` | Comma-separated CORS list |
+| `PGMANAGER_SOCKET` | Local admin socket path; callers are admin (client-side: where to look for one, `-` disables) |
+| `PGMANAGER_SOCKET_GROUP` | Group that owns the admin socket |
 | `PGMANAGER_ENCRYPTION_KEY` | base64 32-byte at-rest encryption key |
 | `PGMANAGER_DATA_DIR` | Where `bootstrap-token.txt` is written |
 | `PGMANAGER_BOOTSTRAP_TOKEN` | Operator-supplied initial admin token (skip auto-generation) |

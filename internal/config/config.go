@@ -58,6 +58,14 @@ type APIConfig struct {
 	// if that directory exists; set to "-" to disable serving the UI entirely
 	// (e.g. on a server that should expose the JSON API only).
 	WebDir string `yaml:"web_dir"`
+
+	// Socket is an optional unix socket path for local admin access. Anyone
+	// who can open it is treated as admin, so it is created mode 0660 and
+	// access is controlled by filesystem permissions. Empty = disabled.
+	Socket string `yaml:"socket"`
+	// SocketGroup optionally chowns the socket to this group, so operators
+	// can reach it without being root.
+	SocketGroup string `yaml:"socket_group"`
 }
 
 type CleanupConfig struct {
@@ -170,6 +178,12 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if webDir := os.Getenv("PGMANAGER_WEB_DIR"); webDir != "" {
 		cfg.API.WebDir = webDir
+	}
+	if socket := os.Getenv("PGMANAGER_SOCKET"); socket != "" {
+		cfg.API.Socket = socket
+	}
+	if group := os.Getenv("PGMANAGER_SOCKET_GROUP"); group != "" {
+		cfg.API.SocketGroup = group
 	}
 	if key := os.Getenv("PGMANAGER_ENCRYPTION_KEY"); key != "" {
 		cfg.Crypto.Key = key

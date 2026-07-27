@@ -26,19 +26,48 @@ type ClientConfig struct {
 type Profile struct {
 	APIURL   string          `yaml:"api_url,omitempty"`
 	Token    string          `yaml:"token,omitempty"`
+	Socket   string          `yaml:"socket,omitempty"`
 	Postgres *PostgresConfig `yaml:"postgres,omitempty"`
 	Crypto   *CryptoConfig   `yaml:"crypto,omitempty"`
 }
 
-// Mode returns "api" or "local" depending on how the profile is wired.
+// Mode returns how the profile reaches pgmanager: "api" (remote HTTP),
+// "socket" (local unix socket on the server itself), or "local" (direct
+// Postgres connection).
 func (p *Profile) Mode() string {
 	if p.APIURL != "" {
 		return "api"
+	}
+	if p.Socket != "" {
+		return "socket"
 	}
 	if p.Postgres != nil {
 		return "local"
 	}
 	return ""
+}
+
+// DefaultSocketPath is where `pgmanager serve` is conventionally told to put
+// its local admin socket, and therefore where the CLI looks when no profile
+// is configured. Matches examples/deploy.
+const DefaultSocketPath = "/run/pgmanager/pgmanager.sock"
+
+// LocalSocketPath returns the socket the CLI should try when nothing else is
+// configured, and whether one is actually there. $PGMANAGER_SOCKET overrides
+// the default; "-" disables the probe entirely.
+func LocalSocketPath() (string, bool) {
+	path := os.Getenv("PGMANAGER_SOCKET")
+	if path == "-" {
+		return "", false
+	}
+	if path == "" {
+		path = DefaultSocketPath
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		return path, false
+	}
+	return path, true
 }
 
 // ClientConfigPath returns the canonical location of the client credentials

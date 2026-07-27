@@ -50,19 +50,32 @@ Self-update later with `pgmanager update` (see below).
 
 ## Use Case 1 — First-time laptop setup (API mode)
 
-You have an API URL and a bootstrap (or shared admin) token from whoever runs the VPS.
+You have an API URL. You do **not** need a token in hand — `login` runs a device
+authorization, the same shape as `gh auth login`:
 
 ```bash
-pgmanager login https://pgm.example.com
-# paste the admin token
+pgmanager login https://pgm.example.com [--scope project:myapp]
+#   First copy your one-time code: WXYZ-2468
+#   Press Enter to open https://pgm.example.com/device in your browser...
 
 pgmanager auth whoami       # confirm: token + scopes
 pgmanager profile show      # confirm current profile
 ```
 
-Profile is stored at `~/.config/pgmanager/credentials.yaml` (mode 0600). Token is never printed by `profile show`.
+Give the code to whoever administers the server (or approve it yourself in the
+admin UI's Devices view, in a browser already signed in). They run
+`pgmanager auth approve WXYZ-2468 --scope <what you should have>`, and this
+machine receives its own token. Nothing secret is sent between machines. Codes
+expire after 10 minutes.
 
-If you don't have a token yet, ask the VPS operator to mint one for you. They follow `pgmanager-server` skill → "Use Case: First-time VPS setup" to get the bootstrap token, then `pgmanager auth create-token --name <you> --scope admin --expires 365d` to issue one for you.
+`--scope` on `login` only *requests* — the approver decides what is granted.
+
+Use `pgmanager login <url> --with-token` to paste an existing token instead:
+that is the path for CI, and for the very first login against a brand new
+server (nobody can approve a device yet). `--no-browser` prints the URL rather
+than opening one; it is chosen automatically over SSH.
+
+Profile is stored at `~/.config/pgmanager/credentials.yaml` (mode 0600). Token is never printed by `profile show`.
 
 ## Use Case 2 — Local development (no remote server)
 
@@ -142,6 +155,9 @@ pgmanager auth whoami
 pgmanager auth list-tokens
 pgmanager auth create-token --name <n> --scope <s> [--scope <s2> ...] [--expires 90d]
 pgmanager auth revoke-token <prefix>
+pgmanager auth devices                      # devices awaiting authorization
+pgmanager auth approve <code> --scope <s> [--name <n>] [--expires 90d]
+pgmanager auth deny <code>
 ```
 
 Scope grammar:
@@ -169,7 +185,7 @@ Deletes expired DBs (TTL passed) and PR DBs older than the duration. Duration: `
 pgmanager profile list
 pgmanager profile use <name>
 pgmanager profile show          # never prints the token
-pgmanager login <api-url> [--name <profile-name>]
+pgmanager login <api-url> [--name <profile-name>] [--scope <s>] [--with-token] [--no-browser]
 pgmanager logout [profile]
 ```
 
@@ -313,11 +329,26 @@ Copy the token into the CI secret store. The shown prefix (first 16 chars) is th
 
 ### Use Case 8 — Issue an admin token for another teammate
 
+Prefer the device flow — it means no token ever travels over chat or email.
+Alice runs:
+
 ```bash
-pgmanager auth create-token --name "alice-laptop" --scope admin --expires 365d
+pgmanager login https://pgm.example.com
+#   First copy your one-time code: WXYZ-2468
 ```
 
-Send the plaintext via a one-time-secret channel. They run `pgmanager login https://pgm.example.com` and paste it.
+She sends you the code (it is useless without your approval, and it dies in 10
+minutes). You check what is asking, then grant:
+
+```bash
+pgmanager auth devices        # confirm the client name and IP match Alice
+pgmanager auth approve WXYZ-2468 --scope admin --expires 365d
+```
+
+Her CLI unblocks and saves the token itself.
+
+Only fall back to `pgmanager auth create-token --name "alice-laptop" --scope admin --expires 365d`
+plus a one-time-secret channel when she can't run the flow interactively.
 
 ### Use Case 9 — Revoke a leaked or unused token
 
@@ -523,7 +554,10 @@ Start with `pgmanager doctor` — it prints active profile, mode, whether the to
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| `no profile configured` | Fresh laptop with no `credentials.yaml` | `pgmanager login <api-url>` or export `PGMANAGER_API_URL`+`PGMANAGER_API_TOKEN` |
+| `no profile configured` | Fresh laptop with no `credentials.yaml` | `pgmanager login <api-url>` or export `PGMANAGER_API_URL`+`PGMANAGER_API_TOKEN`. On the server itself, check the admin socket exists (`$PGMANAGER_SOCKET`, default `/run/pgmanager/pgmanager.sock`) |
+| `login` hangs at "Waiting for approval" | Nobody has approved the code yet | Ask an operator to run `pgmanager auth approve <code> --scope <s>`, or approve it in the admin UI's Devices view |
+| `device code expired before it was approved` | Codes live 10 minutes | Re-run `pgmanager login` and get the code approved promptly |
+| `device authorization was denied` | An operator rejected it | Ask why; re-run `login` if it was a mistake |
 | `401 invalid token` | Token revoked, expired, or never created | `pgmanager auth list-tokens`; re-issue with `auth create-token` |
 | `403 insufficient scope` | Token's scopes don't authorize this action | `pgmanager auth whoami`; create a token with a broader scope |
 | `connection refused` to API | Server / Caddy not running, or wrong URL | `curl <api>/api/health` from your machine; ask the operator to check `docker compose ps` |

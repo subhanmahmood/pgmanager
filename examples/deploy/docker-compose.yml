@@ -40,6 +40,10 @@ services:
       PGMANAGER_REQUIRE_TOKEN: "true"
       PGMANAGER_ENCRYPTION_KEY: ${PGMANAGER_ENCRYPTION_KEY:?run `pgmanager keygen` and set PGMANAGER_ENCRYPTION_KEY}
       PGMANAGER_DATA_DIR: /var/lib/pgmanager
+      # Local admin socket. Anything that can open it is admin, so it stays
+      # inside the container — `docker compose exec` is the way in. This is
+      # what makes the bootstrap token disposable.
+      PGMANAGER_SOCKET: /run/pgmanager/pgmanager.sock
       # Uncomment to pre-seed the admin token instead of letting it auto-generate:
       # PGMANAGER_BOOTSTRAP_TOKEN: ${PGMANAGER_BOOTSTRAP_TOKEN}
     volumes:

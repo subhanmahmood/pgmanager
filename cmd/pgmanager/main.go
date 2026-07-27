@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +33,7 @@ var Version = "dev"
 var (
 	cfgFile       string
 	profileFlag   string
+	socketFlag    string
 	jsonOutput    bool
 	clientCfg     *config.ClientConfig
 	clientCfgPath string
@@ -69,6 +72,7 @@ func newRootCmd() *cobra.Command {
 
 	root.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "server config file path (for `serve`); auto-discovers pgmanager.yaml")
 	root.PersistentFlags().StringVar(&profileFlag, "profile", "", "client profile to use (overrides $PGMANAGER_PROFILE and credentials.yaml current)")
+	root.PersistentFlags().StringVar(&socketFlag, "socket", "", "connect to a local `pgmanager serve` over this unix socket (server-side admin)")
 	root.PersistentFlags().BoolVar(&jsonOutput, "json", false, "output JSON instead of human-readable tables")
 
 	root.AddCommand(
@@ -95,9 +99,24 @@ func newRootCmd() *cobra.Command {
 // getClient resolves the active profile and returns a configured client.
 // Callers must Close it.
 func getClient(ctx context.Context) (client.Client, string, error) {
+	// An explicit --socket beats everything: it's how you say "talk to the
+	// server running right here", regardless of what's in credentials.yaml.
+	if socketFlag != "" {
+		return client.NewUnix(socketFlag), "socket", nil
+	}
+
 	name, profile, err := config.ResolveProfile(clientCfg, profileFlag)
 	if err != nil {
+		// No profile configured. If we're sitting on the box running
+		// `pgmanager serve`, its local admin socket is right there — use it
+		// rather than telling the operator to log in to their own server.
+		if path, ok := config.LocalSocketPath(); ok {
+			return client.NewUnix(path), "socket", nil
+		}
 		return nil, "", err
+	}
+	if profile.Socket != "" && profile.APIURL == "" {
+		return client.NewUnix(profile.Socket), name, nil
 	}
 	if profile.APIURL != "" {
 		token := profile.Token
@@ -480,10 +499,19 @@ func newInitCmd() *cobra.Command {
 
 func newLoginCmd() *cobra.Command {
 	var profileName string
+	var withToken bool
+	var noBrowser bool
+	var scopes []string
 	cmd := &cobra.Command{
 		Use:   "login <api-url>",
-		Short: "Save an API token for a remote pgmanager",
-		Args:  cobra.ExactArgs(1),
+		Short: "Authenticate this device against a remote pgmanager",
+		Long: "Authenticate this device against a remote pgmanager.\n\n" +
+			"By default this starts a device authorization: pgmanager prints a short\n" +
+			"code, you approve it from the admin UI in a browser that is already\n" +
+			"logged in, and this machine receives its own scoped token.\n\n" +
+			"Use --with-token to paste an existing token instead — that is the path\n" +
+			"for CI and for the bootstrap token on first setup.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			apiURL := strings.TrimRight(args[0], "/")
 			cfg := clientCfg
@@ -495,7 +523,15 @@ func newLoginCmd() *cobra.Command {
 				name = deriveProfileName(apiURL)
 			}
 
-			token, err := readToken(cmd)
+			var token string
+			var err error
+			// A token in the environment means the caller already has one —
+			// don't start an interactive flow they can't complete.
+			if withToken || os.Getenv("PGMANAGER_API_TOKEN") != "" {
+				token, err = readToken(cmd)
+			} else {
+				token, err = deviceLogin(cmd, apiURL, scopes, noBrowser)
+			}
 			if err != nil {
 				return err
 			}
@@ -519,7 +555,88 @@ func newLoginCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&profileName, "name", "", "profile name (default: derived from URL host)")
+	cmd.Flags().BoolVar(&withToken, "with-token", false, "paste an existing token instead of running the device flow")
+	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "print the verification URL instead of opening a browser")
+	cmd.Flags().StringArrayVar(&scopes, "scope", nil, "scope to request (repeatable); the approver decides what is granted")
 	return cmd
+}
+
+// deviceLogin runs the device authorization flow and returns the token an
+// operator approved for this machine.
+func deviceLogin(cmd *cobra.Command, apiURL string, scopes []string, noBrowser bool) (string, error) {
+	ctx := cmd.Context()
+	out := cmd.ErrOrStderr()
+	c := client.NewHTTP(apiURL, "")
+
+	da, err := c.StartDeviceAuth(ctx, deviceClientName(), scopes)
+	if err != nil {
+		return "", fmt.Errorf("start device authorization: %w", err)
+	}
+
+	fmt.Fprintf(out, "\n  First copy your one-time code: %s\n\n", da.UserCode)
+	if noBrowser || !canOpenBrowser() {
+		fmt.Fprintf(out, "  Open this URL in a browser signed in to pgmanager:\n  %s\n\n", da.VerificationURI)
+	} else {
+		fmt.Fprint(out, "  Press Enter to open "+da.VerificationURI+" in your browser... ")
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+		if err := openBrowser(da.VerificationURIComplete); err != nil {
+			fmt.Fprintf(out, "  Could not open a browser (%v). Open this URL instead:\n  %s\n\n", err, da.VerificationURI)
+		}
+	}
+
+	fmt.Fprint(out, "  Waiting for approval...")
+	token, info, err := c.WaitForDeviceAuth(ctx, da)
+	if err != nil {
+		fmt.Fprintln(out)
+		return "", err
+	}
+	scopeList := ""
+	if info != nil {
+		scopeList = strings.Join(info.Scopes, ",")
+	}
+	fmt.Fprintf(out, " approved (scopes: %s)\n\n", scopeList)
+	return token, nil
+}
+
+// deviceClientName is what the approver sees in the admin UI. Best-effort:
+// a hostname is enough to tell "my laptop" from "the CI runner".
+func deviceClientName() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		return "pgmanager cli"
+	}
+	return host
+}
+
+// canOpenBrowser reports whether opening a browser is likely to reach the
+// human sitting in front of this terminal. Over SSH it would open on the
+// wrong machine, if at all.
+func canOpenBrowser() bool {
+	if os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_TTY") != "" {
+		return false
+	}
+	stat, _ := os.Stdin.Stat()
+	if stat == nil || (stat.Mode()&os.ModeCharDevice) == 0 {
+		return false // not a terminal; nobody is watching
+	}
+	if runtime.GOOS == "linux" && os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
+		return false
+	}
+	return true
+}
+
+func openBrowser(url string) error {
+	var cmd string
+	var args []string
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = "open"
+	case "windows":
+		cmd, args = "rundll32", []string{"url.dll,FileProtocolHandler"}
+	default:
+		cmd = "xdg-open"
+	}
+	return exec.Command(cmd, append(args, url)...).Start()
 }
 
 func newLogoutCmd() *cobra.Command {
@@ -766,7 +883,102 @@ func newAuthCmd() *cobra.Command {
 		},
 	})
 
+	cmd.AddCommand(&cobra.Command{
+		Use:   "devices",
+		Short: "List devices waiting for authorization",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			c, err := getDeviceClient(ctx)
+			if err != nil {
+				return err
+			}
+			reqs, err := c.ListDeviceRequests(ctx)
+			if err != nil {
+				return err
+			}
+			return emit(reqs, func() {
+				if len(reqs) == 0 {
+					fmt.Println("No devices waiting for approval")
+					return
+				}
+				fmt.Printf("%-12s %-25s %-16s %s\n", "CODE", "CLIENT", "IP", "REQUESTED SCOPES")
+				fmt.Println(strings.Repeat("-", 80))
+				for _, d := range reqs {
+					fmt.Printf("%-12s %-25s %-16s %s\n", d.UserCode, d.ClientName, d.ClientIP, strings.Join(d.RequestedScopes, ","))
+				}
+			})
+		},
+	})
+
+	approveCmd := &cobra.Command{
+		Use:   "approve <user-code>",
+		Short: "Approve a waiting device and mint its token",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			name, _ := cmd.Flags().GetString("name")
+			scopes, _ := cmd.Flags().GetStringSlice("scope")
+			expires, _ := cmd.Flags().GetString("expires")
+			if len(scopes) == 0 {
+				return fmt.Errorf("--scope is required: decide what this device may do")
+			}
+			c, err := getDeviceClient(ctx)
+			if err != nil {
+				return err
+			}
+			info, err := c.ApproveDeviceRequest(ctx, args[0], name, scopes, expires)
+			if err != nil {
+				return err
+			}
+			return emit(info, func() {
+				fmt.Printf("Approved %s — issued token %s (scopes: %s)\n",
+					args[0], info.TokenPrefix, strings.Join(info.Scopes, ", "))
+				fmt.Println("The waiting device will pick it up on its next poll.")
+			})
+		},
+	}
+	approveCmd.Flags().String("name", "", "token name (default: the device's reported hostname)")
+	approveCmd.Flags().StringSlice("scope", nil, "scope to grant (repeatable). Examples: admin | project:myapp | project:myapp:env:dev")
+	approveCmd.Flags().String("expires", "", "expiration duration (e.g., 90d); empty = no expiry")
+	cmd.AddCommand(approveCmd)
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "deny <user-code>",
+		Short: "Reject a waiting device",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			c, err := getDeviceClient(ctx)
+			if err != nil {
+				return err
+			}
+			if err := c.DenyDeviceRequest(ctx, args[0]); err != nil {
+				return err
+			}
+			return emit(map[string]string{"status": "denied", "user_code": args[0]}, func() {
+				fmt.Printf("Denied device %s\n", args[0])
+			})
+		},
+	})
+
 	return cmd
+}
+
+// getDeviceClient returns a client that can manage device authorizations.
+// These endpoints only exist on the HTTP API, so a direct-Postgres profile
+// can't serve them.
+func getDeviceClient(ctx context.Context) (*client.HTTPClient, error) {
+	c, name, err := getClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	hc, ok := c.(*client.HTTPClient)
+	if !ok {
+		c.Close()
+		return nil, fmt.Errorf("profile %q talks to Postgres directly; device authorization needs the API "+
+			"(use an api_url profile, or --socket on the server itself)", name)
+	}
+	return hc, nil
 }
 
 // --- doctor & keygen --------------------------------------------------------

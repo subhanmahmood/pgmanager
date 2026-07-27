@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -91,44 +92,66 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var expiresAt *time.Time
-	if req.Expires != "" {
-		d, err := parseDuration(req.Expires)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid expires duration: %v", err))
-			return
-		}
-		t := time.Now().Add(d)
-		expiresAt = &t
-	}
-
-	creator := "unknown"
-	if info := AuthFromContext(r.Context()); info != nil {
-		creator = info.Display
-	}
-
-	plain, hash, prefix, err := auth.GenerateToken()
+	expiresAt, err := parseExpires(req.Expires)
 	if err != nil {
-		writeInternalError(w, "generate token", err)
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	tok := &meta.Token{
-		Name:        req.Name,
-		TokenHash:   hash,
-		TokenPrefix: prefix,
-		Scopes:      req.Scopes,
-		ExpiresAt:   expiresAt,
-		CreatedBy:   creator,
-	}
-	if err := s.store.CreateToken(r.Context(), tok); err != nil {
-		writeInternalError(w, "store token", err)
+
+	plain, tok, err := s.issueToken(r.Context(), req.Name, req.Scopes, expiresAt, creatorOf(r))
+	if err != nil {
+		writeInternalError(w, "issue token", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, CreateTokenResponse{
 		Token:       plain,
-		TokenPrefix: prefix,
+		TokenPrefix: tok.TokenPrefix,
 		Info:        tokenView(*tok),
 	})
+}
+
+// parseExpires turns an optional duration string ("90d") into an absolute
+// expiry. An empty string means "never expires".
+func parseExpires(expires string) (*time.Time, error) {
+	if expires == "" {
+		return nil, nil
+	}
+	d, err := parseDuration(expires)
+	if err != nil {
+		return nil, fmt.Errorf("invalid expires duration: %v", err)
+	}
+	t := time.Now().Add(d)
+	return &t, nil
+}
+
+// creatorOf names the principal a token should be attributed to.
+func creatorOf(r *http.Request) string {
+	if info := AuthFromContext(r.Context()); info != nil {
+		return info.Display
+	}
+	return "unknown"
+}
+
+// issueToken generates, stores and returns a token. Callers are responsible
+// for validating name and scopes first. Shared by POST /auth/tokens and
+// device-flow approval so both mint tokens identically.
+func (s *Server) issueToken(ctx context.Context, name string, scopes []string, expiresAt *time.Time, creator string) (string, *meta.Token, error) {
+	plain, hash, prefix, err := auth.GenerateToken()
+	if err != nil {
+		return "", nil, fmt.Errorf("generate token: %w", err)
+	}
+	tok := &meta.Token{
+		Name:        name,
+		TokenHash:   hash,
+		TokenPrefix: prefix,
+		Scopes:      scopes,
+		ExpiresAt:   expiresAt,
+		CreatedBy:   creator,
+	}
+	if err := s.store.CreateToken(ctx, tok); err != nil {
+		return "", nil, fmt.Errorf("store token: %w", err)
+	}
+	return plain, tok, nil
 }
 
 func (s *Server) revokeToken(w http.ResponseWriter, r *http.Request) {

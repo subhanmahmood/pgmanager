@@ -17,6 +17,7 @@ const state = {
   databases: {},
   expanded: new Set(),
   tokens: [],
+  devices: [],
 };
 
 /* ------------------------------------------------------------------ dom */
@@ -354,15 +355,77 @@ function renderTokens() {
   ]));
 }
 
+/* -------------------------------------------------------------- devices */
+
+async function loadDevices() {
+  state.devices = (await api('GET', '/auth/devices')) || [];
+  renderDevices();
+}
+
+function renderDevices() {
+  const list = $('devicesList');
+
+  if (state.devices.length === 0) {
+    list.replaceChildren(el('div', { class: 'empty', text: 'No devices waiting for approval.' }));
+    return;
+  }
+
+  const rows = state.devices.map((d) => el('tr', {}, [
+    el('td', { class: 'mono', text: d.user_code }),
+    el('td', { text: d.client_name || '—' }),
+    el('td', { class: 'mono', text: d.client_ip || '—' }),
+    el('td', { class: 'mono', text: (d.requested_scopes || []).join(', ') || '—' }),
+    el('td', { class: 'muted', text: relativeExpiry(d.expires_at) }),
+    el('td', { class: 'actions' }, [
+      el('button', {
+        class: 'small', type: 'button',
+        'data-action': 'review-device', 'data-code': d.user_code, text: 'Review',
+      }),
+    ]),
+  ]));
+
+  const header = el('tr', {}, ['Code', 'Client', 'IP', 'Requested scopes', 'Expires', '']
+    .map((h) => el('th', { text: h })));
+
+  list.replaceChildren(el('div', { class: 'panel' }, [
+    el('table', {}, [el('thead', {}, [header]), el('tbody', {}, rows)]),
+  ]));
+}
+
+// Opens the approval dialog for one waiting device.
+async function reviewDevice(userCode) {
+  const d = await api('GET', `/auth/device/${encodeURIComponent(userCode)}`);
+
+  $('deviceDetail').replaceChildren(
+    el('dt', { text: 'Code' }), el('dd', { class: 'mono', text: d.user_code }),
+    el('dt', { text: 'Client' }), el('dd', { text: d.client_name || 'unknown' }),
+    el('dt', { text: 'IP' }), el('dd', { class: 'mono', text: d.client_ip || 'unknown' }),
+    el('dt', { text: 'Requested' }), el('dd', { class: 'mono', text: (d.requested_scopes || []).join('\n') || 'nothing specific' }),
+    el('dt', { text: 'Expires' }), el('dd', { text: relativeExpiry(d.expires_at) }),
+  );
+
+  const form = $('formDevice');
+  form.reset();
+  form.dataset.code = d.user_code;
+  $('deviceTokenName').value = d.client_name || `device-${d.user_code}`;
+  // Prefill with what was asked for so the common case is one click, but the
+  // approver still has to look at it.
+  $('deviceScopes').value = (d.requested_scopes || []).join('\n');
+  $('deviceError').hidden = true;
+  openModal('modal-device');
+  $('deviceScopes').focus();
+}
+
 /* ------------------------------------------------------------ views/nav */
 
-const VIEWS = ['projects', 'tokens', 'maintenance'];
+const VIEWS = ['projects', 'tokens', 'devices', 'maintenance'];
 
 // Loaders are best-effort: a non-admin token may legitimately lack the
 // `tokens` scope, in which case that view just reports the failure.
 const LOADERS = {
   projects: loadProjects,
   tokens: loadTokens,
+  devices: loadDevices,
   maintenance: renderWhoami,
 };
 
@@ -419,7 +482,32 @@ async function signIn(token) {
   $('whoamiPrefix').textContent = state.whoami.token_prefix;
 
   checkHealth();
-  await showView(location.hash.slice(1) || 'projects');
+  await showView(initialView());
+
+  // Arriving from `pgmanager login` (/device?code=WXYZ-2468): the operator
+  // followed a link to approve a specific device, so go straight there.
+  if (deviceCodeFromURL) {
+    $('deviceCode').value = deviceCodeFromURL;
+    const code = deviceCodeFromURL;
+    deviceCodeFromURL = '';
+    try {
+      await reviewDevice(code);
+    } catch (err) {
+      showError('deviceLookupError', err);
+    }
+  }
+}
+
+// The device-approval deep link lives at a real path (/device) rather than a
+// hash, because that is what is printable in a terminal. Everything else is
+// hash-routed.
+let deviceCodeFromURL = location.pathname.replace(/\/+$/, '') === '/device'
+  ? (new URLSearchParams(location.search).get('code') || '').trim()
+  : '';
+
+function initialView() {
+  if (deviceCodeFromURL || location.pathname.replace(/\/+$/, '') === '/device') return 'devices';
+  return location.hash.slice(1) || 'projects';
 }
 
 function signOut(message) {
@@ -429,6 +517,7 @@ function signOut(message) {
   state.databases = {};
   state.expanded.clear();
   state.tokens = [];
+  state.devices = [];
   localStorage.removeItem(TOKEN_KEY);
 
   $('app').hidden = true;
@@ -550,6 +639,62 @@ $('formToken').addEventListener('submit', async (e) => {
   }
 });
 
+$('formDeviceLookup').addEventListener('submit', (e) => {
+  e.preventDefault();
+  $('deviceLookupError').hidden = true;
+  const code = $('deviceCode').value.trim();
+  if (!code) {
+    showError('deviceLookupError', new Error('Enter the code shown by the CLI.'));
+    return;
+  }
+  reviewDevice(code).catch((err) => {
+    if (err.status === 401 || err.status === 403) handle(err);
+    else showError('deviceLookupError', err);
+  });
+});
+
+$('formDevice').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('deviceError').hidden = true;
+
+  const code = $('formDevice').dataset.code;
+  const name = $('deviceTokenName').value.trim();
+  const scopes = $('deviceScopes').value.split('\n').map((s) => s.trim()).filter(Boolean);
+  const expires = $('deviceExpires').value.trim();
+
+  if (scopes.length === 0) {
+    showError('deviceError', new Error('At least one scope is required.'));
+    return;
+  }
+
+  try {
+    await api('POST', `/auth/device/${encodeURIComponent(code)}/approve`, { name, scopes, expires });
+    closeModal('modal-device');
+    // The token goes straight to the waiting device — it is never shown here.
+    toast(`Approved ${code}`);
+    $('deviceCode').value = '';
+    await loadDevices();
+    await loadTokens();
+  } catch (err) {
+    if (err.status === 401 || err.status === 403) handle(err);
+    else showError('deviceError', err);
+  }
+});
+
+$('deviceDeny').addEventListener('click', async () => {
+  const code = $('formDevice').dataset.code;
+  try {
+    await api('POST', `/auth/device/${encodeURIComponent(code)}/deny`);
+    closeModal('modal-device');
+    toast(`Denied ${code}`);
+    $('deviceCode').value = '';
+    await loadDevices();
+  } catch (err) {
+    if (err.status === 401 || err.status === 403) handle(err);
+    else showError('deviceError', err);
+  }
+});
+
 /* --------------------------------------------------------- click routing */
 
 const ACTIONS = {
@@ -615,6 +760,10 @@ const ACTIONS = {
       await loadTokens();
     },
   ),
+
+  'review-device': (data) => reviewDevice(data.code),
+
+  'refresh-devices': () => loadDevices(),
 
   cleanup: () => {
     const olderThan = $('cleanupOlderThan').value.trim() || '7d';
