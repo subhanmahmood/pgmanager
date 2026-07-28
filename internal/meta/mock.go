@@ -176,6 +176,18 @@ func (s *MockStore) ListAllDatabases(ctx context.Context) ([]Database, error) {
 	return result, nil
 }
 
+func (s *MockStore) SetDatabasePassword(ctx context.Context, name, password string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, db := range s.databases {
+		if db.Name == name {
+			db.Password = password
+			return nil
+		}
+	}
+	return fmt.Errorf("database not found: %s", name)
+}
+
 func (s *MockStore) DeleteDatabase(ctx context.Context, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

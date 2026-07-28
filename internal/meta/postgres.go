@@ -360,6 +360,22 @@ func (s *PostgresStore) ListAllDatabases(ctx context.Context) ([]Database, error
 	return s.scanMany(ctx, dbSelect+" ORDER BY name")
 }
 
+func (s *PostgresStore) SetDatabasePassword(ctx context.Context, name, password string) error {
+	ct, err := s.encryptPassword(password)
+	if err != nil {
+		return err
+	}
+	result, err := s.pool.Exec(ctx,
+		"UPDATE pgmanager.databases SET password_ct = $1 WHERE name = $2", ct, name)
+	if err != nil {
+		return fmt.Errorf("failed to update database password: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("database not found: %s", name)
+	}
+	return nil
+}
+
 func (s *PostgresStore) DeleteDatabase(ctx context.Context, name string) error {
 	result, err := s.pool.Exec(ctx, "DELETE FROM pgmanager.databases WHERE name = $1", name)
 	if err != nil {

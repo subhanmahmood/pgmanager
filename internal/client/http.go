@@ -167,6 +167,16 @@ func (c *HTTPClient) ListDatabases(ctx context.Context, projectName string) ([]D
 	return out, nil
 }
 
+func (c *HTTPClient) RotatePassword(ctx context.Context, projectName, env string, prNumber *int, terminate bool) (*Database, error) {
+	path := dbPath(projectName, env, prNumber) + "/rotate"
+	body := map[string]bool{"terminate": terminate}
+	var out Database
+	if err := c.do(ctx, http.MethodPost, path, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *HTTPClient) DeleteDatabase(ctx context.Context, projectName, env string, prNumber *int) error {
 	return c.do(ctx, http.MethodDelete, dbPath(projectName, env, prNumber), nil, nil)
 }

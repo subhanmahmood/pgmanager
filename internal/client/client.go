@@ -62,6 +62,10 @@ type Client interface {
 	GetDatabase(ctx context.Context, project, env string, prNumber *int) (*Database, error)
 	GetDatabaseCredentials(ctx context.Context, project, env string, prNumber *int) (*Database, error)
 	ListDatabases(ctx context.Context, project string) ([]Database, error)
+	// RotatePassword issues a new password for the database's role and
+	// returns the updated credentials. terminate additionally kills open
+	// connections, so holders of the old password must reconnect.
+	RotatePassword(ctx context.Context, project, env string, prNumber *int, terminate bool) (*Database, error)
 	DeleteDatabase(ctx context.Context, project, env string, prNumber *int) error
 
 	// Cleanup.

@@ -146,6 +146,9 @@ type Store interface {
 	GetDatabaseByName(ctx context.Context, name string) (*Database, error)
 	ListDatabases(ctx context.Context, projectID int64) ([]Database, error)
 	ListAllDatabases(ctx context.Context) ([]Database, error)
+	// SetDatabasePassword replaces the stored (encrypted) password for a
+	// database. Used by password rotation.
+	SetDatabasePassword(ctx context.Context, name, password string) error
 	DeleteDatabase(ctx context.Context, name string) error
 
 	// Cleanup operations.
