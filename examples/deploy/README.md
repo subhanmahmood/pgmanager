@@ -174,6 +174,51 @@ git pull                 # only if compose / Caddyfile changed
 ./upgrade.sh --tag v0.2  # rewrite the pin in compose first, then pull/recreate
 ```
 
+### Changing the Caddyfile
+
+`docker-compose.yml` bind-mounts `./Caddyfile` as a **single file**, and Docker
+resolves a single-file mount to an inode when the container starts. `git pull`,
+`sed -i` and most editors write a new file and rename it over the old one, so
+the new content arrives on a new inode while the running Caddy keeps reading
+the old one. The failure is quiet and convincing: `caddy validate` and `caddy
+reload` inside the container both read that same stale inode and report
+success, so the config looks applied while the served behaviour never changes.
+
+Restarting the container is what re-resolves the mount:
+
+```bash
+docker compose restart caddy
+```
+
+`restart` is enough — `up -d --force-recreate` costs a longer outage for every
+site Caddy fronts and buys nothing here. `upgrade.sh` does this automatically:
+it diffs the host `Caddyfile` against the copy the running container sees and
+restarts Caddy only when they differ, so an ordinary image upgrade leaves your
+other sites alone.
+
+(Editing *in place* — `docker compose exec caddy vi /etc/caddy/Caddyfile`, or
+an editor configured not to rename — keeps the inode and does work with a plain
+`reload`. Relying on that is fragile; prefer the restart.)
+
+### Upgrading past the single-hostname change
+
+Deployments created before that change served the admin UI on a second
+hostname, `admin.<api domain>`, via its own Caddy site block. The API and the
+UI come from the same process and the server does no host-based routing, so
+both names were serving identical content; they are now collapsed into one.
+
+After `git pull`:
+
+1. Restart Caddy so the new single-block `Caddyfile` is actually loaded —
+   `./upgrade.sh` detects this and does it for you, or `docker compose restart
+   caddy` by hand. Without it Caddy keeps the two-host config and keeps
+   renewing a certificate for a hostname nothing needs.
+2. `PGMANAGER_ADMIN_DOMAIN` in `.env` is now unread and can be deleted.
+3. Confirm the UI answers on the API hostname (`https://pgm.example.com`), then
+   remove the `admin.<api domain>` DNS record. Do it in that order — the record
+   is what let Caddy issue the old certificate, and there is no rush to delete
+   it.
+
 ### Image tags
 
 Every release publishes four tags to `ghcr.io/subhanmahmood/pgmanager`:

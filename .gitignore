@@ -13,3 +13,6 @@ data/
 .idea/
 .vscode/
 *.swp
+
+# upgrade.sh --tag leaves a compose backup behind
+examples/deploy/docker-compose.yml.bak
