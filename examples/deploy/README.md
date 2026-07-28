@@ -4,9 +4,8 @@ Five steps to a working remote pgmanager that your laptop and CI talk to over HT
 
 ## Prerequisites
 - A VPS with Docker + Docker Compose installed.
-- DNS A/AAAA records pointing two hostnames at the VPS:
-  - `pgm.example.com` — the API, for the CLI and CI.
-  - `admin.pgm.example.com` — the browser admin UI.
+- A DNS A/AAAA record pointing one hostname at the VPS — `pgm.example.com` —
+  which serves both the API (for the CLI and CI) and the browser admin UI.
 - Ports 80 and 443 open to the public; **port 5432 stays closed**.
 
 ## 1. Pull the deploy bundle
@@ -28,9 +27,8 @@ sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 24)/" .env
 # At-rest encryption key for stored DB passwords
 sed -i "s|^PGMANAGER_ENCRYPTION_KEY=.*|PGMANAGER_ENCRYPTION_KEY=$(openssl rand -base64 32)|" .env
 
-# Domains Caddy should serve
+# Domain Caddy should serve (API and admin UI share it)
 $EDITOR .env  # set PGMANAGER_API_DOMAIN=pgm.example.com
-              # optionally PGMANAGER_ADMIN_DOMAIN (defaults to admin.<api domain>)
 ```
 
 > Tip: if you already have the `pgmanager` binary, `pgmanager keygen` generates the encryption key in the right format.
@@ -112,17 +110,22 @@ Drop the printed token into your CI secret store as `PGMANAGER_CI_TOKEN`.
 
 ## 6. (Optional) Use the admin UI
 
-Open `https://admin.pgm.example.com` and paste an API token to sign in. The UI
-covers projects, databases, credentials and token management — the same
-operations as the CLI, backed by the same `/api` endpoints.
+Open `https://pgm.example.com` — the UI is served at `/` by the same process
+that serves `/api`. It covers projects, databases, credentials, token
+management and approving device logins, backed by the same endpoints as the CLI.
 
-The token is held in that browser's `localStorage` and sent as a bearer token
-to the same origin; nothing else is stored client-side. Because it is just an
-API token, scope it to what the person needs — hand out `project:<name>` rather
-than `admin` where you can, and revoke it from the Tokens view when done.
+Sign in with an email and password. Create the first account on the VPS:
+
+```bash
+docker compose exec pgmanager pgmanager users add you@example.com
+```
+
+That prints a generated password once. No token is ever pasted into a browser:
+the session is an `HttpOnly` cookie, so script on the page cannot read it, and
+the account allowlist can only be edited here on the server.
 
 To run without the UI (API only), set `PGMANAGER_WEB_DIR=-` on the `pgmanager`
-service and drop the admin site block from the `Caddyfile`.
+service. The API keeps working on the same hostname.
 
 ---
 
@@ -170,6 +173,51 @@ git pull                 # only if compose / Caddyfile changed
 ./upgrade.sh             # pull current pin and recreate
 ./upgrade.sh --tag v0.2  # rewrite the pin in compose first, then pull/recreate
 ```
+
+### Changing the Caddyfile
+
+`docker-compose.yml` bind-mounts `./Caddyfile` as a **single file**, and Docker
+resolves a single-file mount to an inode when the container starts. `git pull`,
+`sed -i` and most editors write a new file and rename it over the old one, so
+the new content arrives on a new inode while the running Caddy keeps reading
+the old one. The failure is quiet and convincing: `caddy validate` and `caddy
+reload` inside the container both read that same stale inode and report
+success, so the config looks applied while the served behaviour never changes.
+
+Restarting the container is what re-resolves the mount:
+
+```bash
+docker compose restart caddy
+```
+
+`restart` is enough — `up -d --force-recreate` costs a longer outage for every
+site Caddy fronts and buys nothing here. `upgrade.sh` does this automatically:
+it diffs the host `Caddyfile` against the copy the running container sees and
+restarts Caddy only when they differ, so an ordinary image upgrade leaves your
+other sites alone.
+
+(Editing *in place* — `docker compose exec caddy vi /etc/caddy/Caddyfile`, or
+an editor configured not to rename — keeps the inode and does work with a plain
+`reload`. Relying on that is fragile; prefer the restart.)
+
+### Upgrading past the single-hostname change
+
+Deployments created before that change served the admin UI on a second
+hostname, `admin.<api domain>`, via its own Caddy site block. The API and the
+UI come from the same process and the server does no host-based routing, so
+both names were serving identical content; they are now collapsed into one.
+
+After `git pull`:
+
+1. Restart Caddy so the new single-block `Caddyfile` is actually loaded —
+   `./upgrade.sh` detects this and does it for you, or `docker compose restart
+   caddy` by hand. Without it Caddy keeps the two-host config and keeps
+   renewing a certificate for a hostname nothing needs.
+2. `PGMANAGER_ADMIN_DOMAIN` in `.env` is now unread and can be deleted.
+3. Confirm the UI answers on the API hostname (`https://pgm.example.com`), then
+   remove the `admin.<api domain>` DNS record. Do it in that order — the record
+   is what let Caddy issue the old certificate, and there is no rush to delete
+   it.
 
 ### Image tags
 

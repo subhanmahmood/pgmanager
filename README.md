@@ -169,10 +169,10 @@ from the server, then `rm bootstrap-token.txt`.
 projects, databases, connection credentials, token management and PR cleanup,
 against the same `/api` endpoints the CLI uses.
 
-The bundled Deployment serves it on `admin.<your API domain>` (override with
-`PGMANAGER_ADMIN_DOMAIN`). Point a DNS record at the VPS and Caddy issues the
-certificate on first request; both hostnames reach the same process, so the UI
-calls the API same-origin and needs no CORS configuration.
+The bundled Deployment serves it on the same hostname as the API, at `/`. One
+DNS record, one certificate, and the UI calls `/api` same-origin — so no CORS
+configuration is needed. `PGMANAGER_WEB_DIR=-` disables the UI and serves the
+JSON API only.
 
 Sign in with an email address and password. Accounts come from an allowlist
 that can only be edited on the server (see below), and the session is an
