@@ -238,7 +238,9 @@ Two config files; they serve different audiences and never mix.
 **`credentials.yaml`** (client) — `~/.config/pgmanager/credentials.yaml`, mode 0600. Holds named profiles managed via `login` / `logout` / `profile use`.
 
 On macOS the bearer token is stored in the **Keychain** (service `pgmanager`,
-account = profile name) and the file records only `token_source: keyring`. On
+account = `profile (path to credentials.yaml)`, so profiles of the same name in
+different config roots stay separate) and the file records only
+`token_source: keyring`. On
 other platforms it stays in the file, which is why an existing plaintext
 `token:` is always still honoured; `pgmanager auth migrate-keychain` moves those
 over, and `PGMANAGER_NO_KEYRING=1` opts out. CI is unaffected — it uses the

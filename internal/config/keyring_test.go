@@ -163,6 +163,86 @@ func TestSavedFileHasNoSecretWhenKeychainBacked(t *testing.T) {
 	}
 }
 
+// Two credentials files on one machine can each have a profile called "prod",
+// pointing at different servers. They must not share a keychain entry: a login
+// to one would overwrite the other's token, and a command would then send the
+// wrong server's bearer token.
+func TestProfilesInDifferentConfigRootsDoNotCollide(t *testing.T) {
+	useKeyring(t)
+
+	rootA, rootB := t.TempDir(), t.TempDir()
+
+	t.Setenv("PGMANAGER_CONFIG_DIR", rootA)
+	a := &Profile{APIURL: "https://a.example.com"}
+	if err := a.SetToken("prod", "pgm_live_a"); err != nil {
+		t.Fatalf("SetToken(a): %v", err)
+	}
+
+	t.Setenv("PGMANAGER_CONFIG_DIR", rootB)
+	b := &Profile{APIURL: "https://b.example.com"}
+	if err := b.SetToken("prod", "pgm_live_b"); err != nil {
+		t.Fatalf("SetToken(b): %v", err)
+	}
+	if got, err := b.Token("prod"); err != nil || got != "pgm_live_b" {
+		t.Fatalf("Token(b): got %q err=%v", got, err)
+	}
+
+	// The first profile still has its own token, not the second one's.
+	t.Setenv("PGMANAGER_CONFIG_DIR", rootA)
+	if got, err := a.Token("prod"); err != nil || got != "pgm_live_a" {
+		t.Fatalf("Token(a) after b logged in: got %q err=%v", got, err)
+	}
+
+	// And logging out of one leaves the other alone.
+	if err := a.ClearToken("prod"); err != nil {
+		t.Fatalf("ClearToken(a): %v", err)
+	}
+	t.Setenv("PGMANAGER_CONFIG_DIR", rootB)
+	if got, err := b.Token("prod"); err != nil || got != "pgm_live_b" {
+		t.Fatalf("logout of a removed b's token: got %q err=%v", got, err)
+	}
+}
+
+// Re-creating a keychain-backed profile with the keychain disabled must not
+// abandon the old entry: it holds a live bearer token that no later command
+// would be able to find, let alone revoke.
+func TestSwitchingToFileClearsKeychainEntry(t *testing.T) {
+	useKeyring(t)
+	t.Setenv("PGMANAGER_CONFIG_DIR", t.TempDir())
+
+	p := &Profile{APIURL: "https://pgm.example.com"}
+	if err := p.SetToken("prod", "pgm_live_old"); err != nil {
+		t.Fatalf("SetToken: %v", err)
+	}
+
+	useFile(t) // as if PGMANAGER_NO_KEYRING were set on the second login
+	if err := p.SetToken("prod", "pgm_live_new"); err != nil {
+		t.Fatalf("SetToken (file): %v", err)
+	}
+	if p.TokenValue != "pgm_live_new" || p.TokenSource != "" {
+		t.Fatalf("got TokenValue=%q TokenSource=%q, want the new token in the file", p.TokenValue, p.TokenSource)
+	}
+
+	orphan := &Profile{TokenSource: TokenSourceKeyring}
+	if got, err := orphan.Token("prod"); err != nil || got != "" {
+		t.Fatalf("old token stranded in the keychain: got %q err=%v", got, err)
+	}
+}
+
+// The same switch on a host with no keychain at all must not fail — Linux and
+// CI never had an entry to clean up.
+func TestSwitchingToFileWithoutKeychainSucceeds(t *testing.T) {
+	useFile(t)
+
+	p := &Profile{APIURL: "https://pgm.example.com", TokenSource: TokenSourceKeyring}
+	if err := p.SetToken("prod", "pgm_live_new"); err != nil {
+		t.Fatalf("SetToken: %v", err)
+	}
+	if p.TokenValue != "pgm_live_new" {
+		t.Fatalf("TokenValue = %q", p.TokenValue)
+	}
+}
+
 func TestKeyringOptOutEnv(t *testing.T) {
 	t.Setenv("PGMANAGER_NO_KEYRING", "1")
 	if KeyringAvailable() {

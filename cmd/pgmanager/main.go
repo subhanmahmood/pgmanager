@@ -536,6 +536,13 @@ func newLoginCmd() *cobra.Command {
 			}
 
 			p := &config.Profile{APIURL: apiURL}
+			// Carry the previous storage backend over so SetToken can tell it
+			// is switching: re-creating a keychain-backed profile with
+			// PGMANAGER_NO_KEYRING must clear the old keychain entry, not
+			// abandon it.
+			if prev, ok := cfg.Profiles[name]; ok {
+				p.TokenSource = prev.TokenSource
+			}
 			if err := p.SetToken(name, token); err != nil {
 				return err
 			}
@@ -549,7 +556,7 @@ func newLoginCmd() *cobra.Command {
 				name, who.TokenPrefix, strings.Join(who.Scopes, ","), path)
 			if p.TokenSource == config.TokenSourceKeyring {
 				fmt.Fprintf(cmd.OutOrStdout(), "Token stored in the macOS Keychain (service %q, account %q).\n",
-					config.KeyringService, name)
+					config.KeyringService, config.KeyringAccount(name))
 			}
 			return nil
 		},
@@ -656,12 +663,6 @@ func newLogoutCmd() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("profile %q not found", name)
 			}
-			// Drop the secret before the profile: once the profile is gone we
-			// no longer know the token was in the keychain, and it would sit
-			// there indefinitely with nothing referencing it.
-			if err := p.ClearToken(name); err != nil {
-				return err
-			}
 			delete(clientCfg.Profiles, name)
 			if clientCfg.Current == name {
 				clientCfg.Current = ""
@@ -672,6 +673,12 @@ func newLogoutCmd() *cobra.Command {
 			}
 			path, err := config.SaveClient(clientCfg)
 			if err != nil {
+				return err
+			}
+			// Only now destroy the secret. Deleting it first would, if the
+			// rewrite failed, leave a profile on disk still claiming its token
+			// is in the keychain when the entry is already gone.
+			if err := p.ClearToken(name); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Removed profile %q from %s\n", name, path)
@@ -1564,7 +1571,7 @@ func readToken(cmd *cobra.Command) (string, error) {
 func printDoctor(report map[string]interface{}) {
 	fmt.Println("pgmanager doctor")
 	fmt.Println(strings.Repeat("-", 40))
-	for _, k := range []string{"credentials_path", "profile_count", "profile", "mode", "api_url", "token_set"} {
+	for _, k := range []string{"credentials_path", "profile_count", "profile", "mode", "api_url", "token_set", "token_store"} {
 		if v, ok := report[k]; ok {
 			fmt.Printf("%-18s %v\n", k+":", v)
 		}

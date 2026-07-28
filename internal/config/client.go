@@ -33,7 +33,8 @@ type Profile struct {
 	// exported only because the YAML encoder needs it to be.
 	TokenValue string `yaml:"token,omitempty"`
 	// TokenSource is "keyring" when the token lives in the OS keychain under
-	// service "pgmanager" and account <profile name>. Empty means TokenValue.
+	// service "pgmanager" (see keyringAccount for the account name). Empty
+	// means TokenValue.
 	TokenSource string `yaml:"token_source,omitempty"`
 	Socket      string `yaml:"socket,omitempty"`
 }
@@ -71,6 +72,14 @@ func (p *Profile) SetToken(name, token string) error {
 		p.TokenValue = ""
 		p.TokenSource = TokenSourceKeyring
 		return nil
+	}
+	// Switching a keychain-backed profile to the file (PGMANAGER_NO_KEYRING on
+	// a Mac) would otherwise leave the previous, still-valid token in the
+	// keychain with nothing recording that it is there — logout could never
+	// remove it. Best-effort, because on a host with no keychain at all this
+	// must not turn a successful login into an error.
+	if p.TokenSource == TokenSourceKeyring {
+		_ = keyringDelete(name)
 	}
 	p.TokenValue = token
 	p.TokenSource = ""
