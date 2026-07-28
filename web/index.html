@@ -48,6 +48,34 @@
                 <div id="projectsList" class="list"></div>
             </section>
 
+            <!-- Data explorer: one page per database, reached from a project's
+                 database row. Not a tab — it is always about a specific DB. -->
+            <section class="view" id="view-explore" hidden>
+                <div class="view-header">
+                    <h2 id="exploreTitle">Explore</h2>
+                    <button class="ghost" data-action="explore-back">Back to projects</button>
+                </div>
+                <div class="explore">
+                    <div class="panel explore-tables">
+                        <h3>Tables</h3>
+                        <div id="exploreTableList" class="list"></div>
+                    </div>
+                    <div class="panel explore-rows">
+                        <div class="view-header">
+                            <h3 id="exploreTableName">No table selected</h3>
+                            <button id="exploreInsert" data-action="row-new" hidden>Insert row</button>
+                        </div>
+                        <p class="form-error" id="exploreError" hidden></p>
+                        <div id="exploreRows"></div>
+                        <div class="row explore-pager" id="explorePager" hidden>
+                            <button class="ghost small" data-action="rows-prev">Previous</button>
+                            <button class="ghost small" data-action="rows-next">Next</button>
+                            <span class="muted" id="exploreRange"></span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
             <!-- Tokens -->
             <section class="view" id="view-tokens" hidden>
                 <div class="view-header">
@@ -150,6 +178,20 @@
             <div class="modal-actions">
                 <button type="button" class="ghost" data-close>Cancel</button>
                 <button type="submit">Create</button>
+            </div>
+        </form>
+    </div>
+
+    <!-- Insert / edit a row. Fields are built in app.js from the table's
+         columns, so this shell is deliberately empty. -->
+    <div class="modal-overlay" id="modal-row" hidden>
+        <form class="modal" id="formRow">
+            <h3 id="rowTitle">Row</h3>
+            <div id="rowFields"></div>
+            <p class="form-error" id="rowError" hidden></p>
+            <div class="modal-actions">
+                <button type="button" class="ghost" data-close>Cancel</button>
+                <button type="submit" id="rowSubmit">Save</button>
             </div>
         </form>
     </div>

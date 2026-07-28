@@ -258,6 +258,49 @@ dd { font-family: ui-monospace, Menlo, monospace; font-size: 0.85em; word-break:
 }
 .secret input { font-family: ui-monospace, Menlo, monospace; font-size: 0.8rem; }
 
+/* ---------- data explorer ---------- */
+
+/* Table picker on the left, rows on the right; stacks on narrow screens. */
+.explore {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 16px;
+    align-items: start;
+}
+.explore-tables .list { gap: 2px; max-height: 60vh; overflow-y: auto; }
+.explore h3 { margin-bottom: 10px; }
+.table-item {
+    text-align: left;
+    font-family: ui-monospace, Menlo, monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.table-item.active {
+    background: var(--accent);
+    color: var(--accent-ink);
+    border-color: var(--accent);
+}
+
+/* A row table is as wide as the table's columns make it, so it scrolls on its
+   own rather than pushing the page sideways. */
+.table-scroll { overflow-x: auto; }
+.table-scroll td { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.explore-pager { align-items: center; }
+.explore-pager .muted { font-size: 0.8rem; }
+
+.field { margin-bottom: 12px; }
+.field .row { align-items: center; }
+label.inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+    margin: 0;
+    font-size: 0.8rem;
+}
+label.inline input { width: auto; margin: 0; }
+
 /* ---------- toast ---------- */
 
 .toast {
@@ -277,4 +320,6 @@ dd { font-family: ui-monospace, Menlo, monospace; font-size: 0.85em; word-break:
     header { gap: 10px; }
     .header-right { width: 100%; margin-left: 0; }
     main { padding: 16px; }
+    .explore { grid-template-columns: minmax(0, 1fr); }
+    .explore-tables .list { max-height: 200px; }
 }

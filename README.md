@@ -179,6 +179,16 @@ that can only be edited on the server (see below), and the session is an
 `HttpOnly` cookie — no token is ever pasted into a browser, and script on the
 page cannot read the credential.
 
+Each database row has an **Explore** button, which opens a page for that one
+database (`#explore/<project>/<env>` — a linkable, reloadable URL): its tables
+down the left, a page of rows on the right, and insert / edit / delete for
+individual rows. Editing addresses a row by its primary key, so a table without
+one is read-only there. The server connects as that database's own role, never
+the Postgres admin role, so the explorer can only reach what those credentials
+already reach — and the routes carry the same scope check as the rest of
+`/projects/{name}/databases/{env}`, meaning a token scoped to one project's PR
+databases can explore exactly those.
+
 The Devices view is where you approve `pgmanager login` requests: enter the
 one-time code (or follow the `/device?code=…` link the CLI prints), see what is
 asking and from where, then choose the name, scopes and expiry of the token it
