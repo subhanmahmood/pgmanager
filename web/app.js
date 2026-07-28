@@ -19,6 +19,11 @@ const state = {
   expanded: new Set(),
   tokens: [],
   devices: [],
+  // Data explorer: which database is open, its table list, and the page of
+  // rows currently on screen.
+  explore: {
+    project: '', env: '', tables: [], schema: '', table: '', page: null, offset: 0,
+  },
 };
 
 /* ------------------------------------------------------------------ dom */
@@ -269,6 +274,10 @@ function renderDatabases(projectName) {
       el('td', { class: 'muted' }, [expiry]),
       el('td', { class: 'actions' }, [
         el('button', {
+          class: 'ghost small', type: 'button', 'data-action': 'explore-database',
+          'data-project': projectName, 'data-env': segment, text: 'Explore',
+        }),
+        el('button', {
           class: 'ghost small', type: 'button', 'data-action': 'db-credentials',
           'data-project': projectName, 'data-env': segment, text: 'Credentials',
         }),
@@ -418,9 +427,311 @@ async function reviewDevice(userCode) {
   $('deviceScopes').focus();
 }
 
+/* ---------------------------------------------------------- data explorer */
+
+// The explorer is a page per database: it lists that database's tables and
+// lets you page through and edit rows. The server connects as the database's
+// own role, so what is reachable here is exactly what those credentials allow.
+
+const ROW_LIMIT = 50;
+
+function explorePath(suffix = '') {
+  const ex = state.explore;
+  return `/projects/${encodeURIComponent(ex.project)}/databases/${encodeURIComponent(ex.env)}${suffix}`;
+}
+
+function rowsPath(extra = '') {
+  const ex = state.explore;
+  const q = new URLSearchParams({ schema: ex.schema });
+  return `${explorePath(`/tables/${encodeURIComponent(ex.table)}/rows`)}?${q}${extra}`;
+}
+
+// Values arrive already JSON-safe from the server; objects and arrays (json,
+// arrays, composite types) are shown as their JSON text.
+function cellText(v) {
+  if (v === null || v === undefined) return 'NULL';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+
+function primaryKeyColumns() {
+  const page = state.explore.page;
+  return page ? page.columns.filter((c) => c.primary_key) : [];
+}
+
+// The key that addresses one row for update/delete. The server insists it
+// names exactly the primary key, so a table without one is read-only here.
+function rowKey(row) {
+  const key = {};
+  for (const col of primaryKeyColumns()) key[col.name] = row[col.name];
+  return key;
+}
+
+async function loadExplore(route) {
+  const ex = state.explore;
+  if (ex.project !== route.project || ex.env !== route.env) {
+    Object.assign(ex, {
+      project: route.project, env: route.env, tables: [], schema: '', table: '', page: null, offset: 0,
+    });
+  }
+  $('exploreTitle').textContent = `Explore ${route.project} / ${route.env}`;
+  $('exploreError').hidden = true;
+
+  const res = await api('GET', explorePath('/tables'));
+  ex.tables = (res && res.tables) || [];
+  renderTableList();
+
+  if (ex.table) await loadRows();
+  else renderRows();
+}
+
+function renderTableList() {
+  const ex = state.explore;
+  const list = $('exploreTableList');
+  if (ex.tables.length === 0) {
+    list.replaceChildren(el('p', { class: 'empty', text: 'No tables in this database.' }));
+    return;
+  }
+  list.replaceChildren(...ex.tables.map((t) => {
+    const selected = t.schema === ex.schema && t.name === ex.table;
+    // Qualify the label only when a non-public schema is in play, so the
+    // common case stays uncluttered.
+    const label = t.schema === 'public' ? t.name : `${t.schema}.${t.name}`;
+    return el('button', {
+      type: 'button',
+      class: `ghost small table-item${selected ? ' active' : ''}`,
+      'data-action': 'select-table',
+      'data-schema': t.schema,
+      'data-table': t.name,
+      text: label,
+    });
+  }));
+}
+
+async function selectTable(schema, table) {
+  const ex = state.explore;
+  ex.schema = schema;
+  ex.table = table;
+  ex.offset = 0;
+  renderTableList();
+  await loadRows();
+}
+
+async function loadRows() {
+  const ex = state.explore;
+  $('exploreError').hidden = true;
+  try {
+    ex.page = await api('GET', rowsPath(`&limit=${ROW_LIMIT}&offset=${ex.offset}`));
+  } catch (err) {
+    if (err.status === 401 || err.status === 403) throw err;
+    ex.page = null;
+    showError('exploreError', err);
+  }
+  renderRows();
+}
+
+function renderRows() {
+  const ex = state.explore;
+  const container = $('exploreRows');
+  const pager = $('explorePager');
+
+  $('exploreTableName').textContent = ex.table
+    ? (ex.schema === 'public' ? ex.table : `${ex.schema}.${ex.table}`)
+    : 'No table selected';
+  $('exploreInsert').hidden = !ex.table;
+
+  if (!ex.table) {
+    container.replaceChildren(el('p', { class: 'empty', text: 'Pick a table to browse its rows.' }));
+    pager.hidden = true;
+    return;
+  }
+  if (!ex.page) {
+    container.replaceChildren();
+    pager.hidden = true;
+    return;
+  }
+
+  const { columns, rows } = ex.page;
+  const editable = primaryKeyColumns().length > 0;
+
+  const nodes = [];
+  if (!editable) {
+    nodes.push(el('p', {
+      class: 'muted',
+      text: 'This table has no primary key, so rows cannot be edited or deleted here.',
+    }));
+  }
+
+  if (rows.length === 0) {
+    nodes.push(el('p', { class: 'empty', text: 'No rows.' }));
+  } else {
+    const header = el('tr', {}, columns
+      .map((c) => el('th', { text: c.primary_key ? `${c.name} 🔑` : c.name }))
+      .concat([el('th', {})]));
+
+    const body = rows.map((row, i) => {
+      const cells = columns.map((c) => {
+        const value = row[c.name];
+        const isNull = value === null || value === undefined;
+        return el('td', { class: isNull ? 'muted' : 'mono', text: cellText(value) });
+      });
+      cells.push(el('td', { class: 'actions' }, editable ? [
+        el('button', {
+          class: 'ghost small', type: 'button', 'data-action': 'row-edit', 'data-index': i, text: 'Edit',
+        }),
+        el('button', {
+          class: 'danger small', type: 'button', 'data-action': 'row-delete', 'data-index': i, text: 'Delete',
+        }),
+      ] : []));
+      return el('tr', {}, cells);
+    });
+
+    nodes.push(el('div', { class: 'table-scroll' }, [
+      el('table', {}, [el('thead', {}, [header]), el('tbody', {}, body)]),
+    ]));
+  }
+
+  container.replaceChildren(...nodes);
+
+  const { total, offset } = ex.page;
+  const first = total === 0 ? 0 : offset + 1;
+  const last = offset + rows.length;
+  $('exploreRange').textContent = `${first}–${last} of ${total}`;
+  pager.querySelector('[data-action="rows-prev"]').disabled = offset === 0;
+  pager.querySelector('[data-action="rows-next"]').disabled = last >= total;
+  pager.hidden = false;
+}
+
+async function pageRows(delta) {
+  const ex = state.explore;
+  const next = ex.offset + delta * ROW_LIMIT;
+  if (next < 0) return;
+  ex.offset = next;
+  await loadRows();
+}
+
+/* ------------------------------------------------------ row insert/edit */
+
+// Built fresh each time the modal opens: one control set per column, kept
+// here so the submit handler can read them back.
+let rowFields = [];
+let rowMode = 'insert';
+let rowOriginal = null;
+
+// The string form of a value as it goes into the editor. Round-trips through
+// the same text the cell shows, so an untouched field submits unchanged.
+function inputValue(v) {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+
+function rowField(col, value, mode) {
+  const input = el('input', {
+    type: 'text', value: inputValue(value), autocomplete: 'off', spellcheck: 'false',
+  });
+
+  const controls = [input];
+  const field = { name: col.name, input, nullBox: null, defaultBox: null };
+
+  const sync = () => {
+    input.disabled = (field.nullBox && field.nullBox.checked)
+      || (field.defaultBox && field.defaultBox.checked);
+  };
+
+  // Inserting: a column with a default (a serial primary key, a timestamp)
+  // should normally be left to Postgres, so offer that as the default choice.
+  if (mode === 'insert' && col.default) {
+    field.defaultBox = el('input', { type: 'checkbox', checked: true });
+    field.defaultBox.addEventListener('change', sync);
+    controls.push(el('label', { class: 'inline' }, [field.defaultBox, ' default']));
+  }
+
+  if (col.nullable) {
+    field.nullBox = el('input', { type: 'checkbox', checked: value === null || value === undefined });
+    field.nullBox.addEventListener('change', sync);
+    controls.push(el('label', { class: 'inline' }, [field.nullBox, ' NULL']));
+  }
+
+  sync();
+  rowFields.push(field);
+
+  const type = el('span', { class: 'muted', text: ` ${col.type}${col.primary_key ? ' 🔑' : ''}` });
+  return el('div', { class: 'field' }, [
+    el('label', {}, [col.name, type]),
+    el('div', { class: 'row' }, controls),
+  ]);
+}
+
+function openRowModal(mode, row) {
+  const page = state.explore.page;
+  if (!page) return;
+
+  rowFields = [];
+  rowMode = mode;
+  rowOriginal = row || null;
+
+  $('rowTitle').textContent = mode === 'insert' ? 'Insert row' : 'Edit row';
+  $('rowSubmit').textContent = mode === 'insert' ? 'Insert' : 'Save';
+  $('rowError').hidden = true;
+  $('rowFields').replaceChildren(
+    ...page.columns.map((col) => rowField(col, row ? row[col.name] : null, mode)),
+  );
+  openModal('modal-row');
+}
+
+// Reads the editor back into the JSON body. On edit, only fields the operator
+// actually touched are sent, so an UPDATE never rewrites columns it did not
+// need to (and never fights a database-side default or trigger).
+function collectRowValues() {
+  const values = {};
+  for (const field of rowFields) {
+    if (field.defaultBox && field.defaultBox.checked) continue;
+    const value = field.nullBox && field.nullBox.checked ? null : field.input.value;
+
+    if (rowMode === 'edit') {
+      const before = rowOriginal[field.name];
+      const beforeIsNull = before === null || before === undefined;
+      if (value === null && beforeIsNull) continue;
+      if (value !== null && !beforeIsNull && value === inputValue(before)) continue;
+    }
+    values[field.name] = value;
+  }
+  return values;
+}
+
+$('formRow').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('rowError').hidden = true;
+
+  const values = collectRowValues();
+  try {
+    if (rowMode === 'insert') {
+      await api('POST', rowsPath(), { values });
+      toast('Row inserted');
+    } else {
+      if (Object.keys(values).length === 0) {
+        closeModal('modal-row');
+        return;
+      }
+      await api('PATCH', rowsPath(), { key: rowKey(rowOriginal), values });
+      toast('Row updated');
+    }
+    closeModal('modal-row');
+    await loadRows();
+  } catch (err) {
+    if (err.status === 401 || err.status === 403) handle(err);
+    else showError('rowError', err);
+  }
+});
+
 /* ------------------------------------------------------------ views/nav */
 
-const VIEWS = ['projects', 'tokens', 'devices', 'maintenance'];
+// TABS are the views with a nav button; VIEWS additionally covers `explore`,
+// which is always about one specific database and so is only reachable from a
+// database row rather than from the nav.
+const TABS = ['projects', 'tokens', 'devices', 'maintenance'];
+const VIEWS = TABS.concat(['explore']);
 
 // Loaders are best-effort: a non-admin token may legitimately lack the
 // `tokens` scope, in which case that view just reports the failure.
@@ -429,18 +740,38 @@ const LOADERS = {
   tokens: loadTokens,
   devices: loadDevices,
   maintenance: renderWhoami,
+  explore: loadExplore,
 };
 
-async function showView(name) {
-  if (!VIEWS.includes(name)) name = 'projects';
-  for (const v of VIEWS) $(`view-${v}`).hidden = v !== name;
-  for (const tab of document.querySelectorAll('.tab')) {
-    tab.classList.toggle('active', tab.dataset.view === name);
+// Routes are hashes. Tabs are bare names; the explorer carries its target in
+// the hash (#explore/myapp/pr_42) so the page survives a reload and can be
+// linked to directly.
+function parseRoute(hash) {
+  const parts = String(hash).replace(/^#/, '').split('/').filter(Boolean).map(decodeURIComponent);
+  if (parts[0] === 'explore' && parts.length >= 3) {
+    return { name: 'explore', project: parts[1], env: parts[2] };
   }
-  if (location.hash.slice(1) !== name) location.hash = name;
+  return { name: TABS.includes(parts[0]) ? parts[0] : 'projects' };
+}
+
+function routeHash(route) {
+  if (route.name === 'explore') {
+    return `explore/${encodeURIComponent(route.project)}/${encodeURIComponent(route.env)}`;
+  }
+  return route.name;
+}
+
+async function showView(target) {
+  const route = typeof target === 'string' ? parseRoute(target) : target;
+  for (const v of VIEWS) $(`view-${v}`).hidden = v !== route.name;
+  for (const tab of document.querySelectorAll('.tab')) {
+    tab.classList.toggle('active', tab.dataset.view === route.name);
+  }
+  const hash = routeHash(route);
+  if (location.hash.slice(1) !== hash) location.hash = hash;
 
   try {
-    await LOADERS[name]();
+    await LOADERS[route.name](route);
   } catch (err) {
     handle(err);
   }
@@ -777,6 +1108,35 @@ const ACTIONS = {
       await loadDatabases(data.project);
     },
   ),
+
+  'explore-database': (data) => showView({ name: 'explore', project: data.project, env: data.env }),
+
+  'explore-back': () => showView('projects'),
+
+  'select-table': (data) => selectTable(data.schema, data.table),
+
+  'rows-prev': () => pageRows(-1),
+
+  'rows-next': () => pageRows(1),
+
+  'row-new': () => openRowModal('insert', null),
+
+  'row-edit': (data) => openRowModal('edit', state.explore.page.rows[Number(data.index)]),
+
+  'row-delete': (data) => {
+    const row = state.explore.page.rows[Number(data.index)];
+    const key = rowKey(row);
+    const label = Object.entries(key).map(([k, v]) => `${k}=${cellText(v)}`).join(', ');
+    return confirmAction(
+      'Delete row?',
+      `Row ${label} will be deleted from ${state.explore.table}. This cannot be undone.`,
+      async () => {
+        await api('DELETE', rowsPath(), { key });
+        toast('Row deleted');
+        await loadRows();
+      },
+    );
+  },
 
   'new-token': () => {
     $('formToken').reset();

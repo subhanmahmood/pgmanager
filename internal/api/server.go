@@ -118,6 +118,15 @@ func (s *Server) buildRouter(authMW func(http.Handler) http.Handler) *chi.Mux {
 		r.Get("/projects/{name}/databases/{env}/credentials", s.getDatabaseCredentials)
 		r.Delete("/projects/{name}/databases/{env}", s.deleteDatabase)
 
+		// Data explorer — browse and edit the contents of a managed database.
+		// Same scope check as the routes above; connects as the database's own
+		// role, never the admin one.
+		r.Get("/projects/{name}/databases/{env}/tables", s.listTables)
+		r.Get("/projects/{name}/databases/{env}/tables/{table}/rows", s.listRows)
+		r.Post("/projects/{name}/databases/{env}/tables/{table}/rows", s.createRow)
+		r.Patch("/projects/{name}/databases/{env}/tables/{table}/rows", s.updateRow)
+		r.Delete("/projects/{name}/databases/{env}/tables/{table}/rows", s.deleteRow)
+
 		r.Post("/cleanup", s.cleanup)
 	})
 
