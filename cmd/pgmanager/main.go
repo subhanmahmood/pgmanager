@@ -251,8 +251,52 @@ func newDBCmd() *cobra.Command {
 	createCmd.Flags().StringSliceVarP(&extensions, "extension", "x", nil,
 		"Postgres extension to install (repeatable; e.g. -x vector -x pg_trgm)")
 
+	var terminate, verboseRotate bool
+	rotateCmd := &cobra.Command{
+		Use:   "rotate <project> <env> [pr-number]",
+		Short: "Generate a new password for a database's user",
+		Long: "Replaces the password of the database's own Postgres role with a freshly\n" +
+			"generated one. Anything still using the old password will fail to connect,\n" +
+			"so update your deployments afterwards. Open connections keep working until\n" +
+			"they close; use --terminate to cut them.\n\n" +
+			"Prints just the new password, so it can be piped or captured:\n" +
+			"  export DATABASE_PASSWORD=$(pgmanager db rotate myapp dev)\n" +
+			"Use -v for the full credential block, or --json for the whole record.",
+		Args: cobra.RangeArgs(2, 3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			project, env, prNumber, err := parseDBArgs(args)
+			if err != nil {
+				return err
+			}
+			c, _, err := getClient()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			info, err := c.RotatePassword(ctx, project, env, prNumber, terminate)
+			if err != nil {
+				return err
+			}
+			return emit(info, func() {
+				if !verboseRotate {
+					// Bare password on stdout: this is the pipeable default.
+					fmt.Println(info.Password)
+					return
+				}
+				fmt.Println("Password rotated")
+				printCredentials(info)
+			})
+		},
+	}
+	rotateCmd.Flags().BoolVar(&terminate, "terminate", false,
+		"also terminate open connections to the database")
+	rotateCmd.Flags().BoolVarP(&verboseRotate, "verbose", "v", false,
+		"print the full credentials instead of just the new password")
+
 	cmd.AddCommand(
 		createCmd,
+		rotateCmd,
 		&cobra.Command{
 			Use:   "delete <project> <env> [pr-number]",
 			Short: "Delete a database",

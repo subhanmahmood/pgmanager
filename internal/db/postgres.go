@@ -134,6 +134,47 @@ func (c *PostgresClient) DropDatabase(ctx context.Context, dbName, userName stri
 	return nil
 }
 
+// SetUserPassword changes the password of an existing role. Postgres only
+// checks the password at connect time, so already-open sessions survive;
+// callers that need to cut off holders of the old password must terminate
+// backends as well.
+func (c *PostgresClient) SetUserPassword(ctx context.Context, userName, password string) error {
+	conn, err := c.connect(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to connect: %w", err)
+	}
+	defer conn.Close(ctx)
+
+	sql := fmt.Sprintf("ALTER USER %s WITH PASSWORD %s",
+		pgx.Identifier{userName}.Sanitize(),
+		quoteLiteral(password))
+	if _, err := conn.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("failed to set password: %w", err)
+	}
+	return nil
+}
+
+// TerminateConnections kills every backend attached to a database except the
+// caller's own. Used after a password rotation so clients holding the old
+// credential are forced to reconnect.
+func (c *PostgresClient) TerminateConnections(ctx context.Context, dbName string) error {
+	conn, err := c.connect(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to connect: %w", err)
+	}
+	defer conn.Close(ctx)
+
+	sql := fmt.Sprintf(`
+		SELECT pg_terminate_backend(pid)
+		FROM pg_stat_activity
+		WHERE datname = %s AND pid <> pg_backend_pid()`,
+		quoteLiteral(dbName))
+	if _, err := conn.Exec(ctx, sql); err != nil {
+		return fmt.Errorf("failed to terminate connections: %w", err)
+	}
+	return nil
+}
+
 // DatabaseExists checks if a database exists
 func (c *PostgresClient) DatabaseExists(ctx context.Context, dbName string) (bool, error) {
 	conn, err := c.connect(ctx)

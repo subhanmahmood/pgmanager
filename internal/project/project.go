@@ -358,6 +358,71 @@ func (m *Manager) ListDatabases(ctx context.Context, projectName string) ([]Data
 	return result, nil
 }
 
+// RotatePassword generates a new password for the database's own role, applies
+// it in Postgres, and stores it. Returns the database info carrying the new
+// password. If terminate is true, existing backends on the database are killed
+// so clients still holding the old credential are forced to reconnect.
+func (m *Manager) RotatePassword(ctx context.Context, projectName, env string, prNumber *int, terminate bool) (*DatabaseInfo, error) {
+	if err := ValidateEnv(env); err != nil {
+		return nil, err
+	}
+
+	project, err := m.store.GetProject(ctx, projectName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get project: %w", err)
+	}
+	if project == nil {
+		return nil, fmt.Errorf("project '%s' not found", projectName)
+	}
+
+	dbRecord, err := m.store.GetDatabase(ctx, project.ID, env, prNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get database: %w", err)
+	}
+	if dbRecord == nil {
+		envStr := env
+		if prNumber != nil {
+			envStr = fmt.Sprintf("pr_%d", *prNumber)
+		}
+		return nil, fmt.Errorf("database not found for %s/%s", projectName, envStr)
+	}
+
+	password := db.GeneratePassword()
+	if err := m.pg.SetUserPassword(ctx, dbRecord.UserName, password); err != nil {
+		return nil, fmt.Errorf("failed to rotate password: %w", err)
+	}
+
+	// Postgres is now the source of the new password; if the metadata write
+	// fails, put the old one back so stored credentials stay usable.
+	if err := m.store.SetDatabasePassword(ctx, dbRecord.Name, password); err != nil {
+		_ = m.pg.SetUserPassword(ctx, dbRecord.UserName, dbRecord.Password)
+		return nil, fmt.Errorf("failed to store new password: %w", err)
+	}
+
+	if terminate {
+		if err := m.pg.TerminateConnections(ctx, dbRecord.Name); err != nil {
+			// The rotation itself succeeded; don't fail the call over this.
+			fmt.Printf("Warning: failed to terminate connections to %s: %v\n", dbRecord.Name, err)
+		}
+	}
+
+	host := m.cfg.Postgres.EffectiveHost()
+	port := m.cfg.Postgres.EffectivePort()
+	return &DatabaseInfo{
+		Project:      projectName,
+		Env:          env,
+		PRNumber:     dbRecord.PRNumber,
+		DatabaseName: dbRecord.Name,
+		UserName:     dbRecord.UserName,
+		Password:     password,
+		Host:         host,
+		Port:         port,
+		ConnString:   db.ConnectionString(host, port, dbRecord.Name, dbRecord.UserName, password, m.cfg.Postgres.SSLMode),
+		CreatedAt:    dbRecord.CreatedAt,
+		ExpiresAt:    dbRecord.ExpiresAt,
+	}, nil
+}
+
 // DeleteDatabase deletes a database
 func (m *Manager) DeleteDatabase(ctx context.Context, projectName, env string, prNumber *int) error {
 	if err := ValidateEnv(env); err != nil {

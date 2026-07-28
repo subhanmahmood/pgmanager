@@ -70,6 +70,13 @@ type CreateDatabaseRequest struct {
 	Extensions []string `json:"extensions,omitempty"`
 }
 
+// RotatePasswordRequest is the (optional) body of a password rotation.
+type RotatePasswordRequest struct {
+	// Terminate kills existing connections to the database after the
+	// rotation, so clients holding the old password must reconnect.
+	Terminate bool `json:"terminate,omitempty"`
+}
+
 type CleanupRequest struct {
 	OlderThan string `json:"older_than"`
 }
@@ -334,6 +341,56 @@ func (s *Server) getDatabaseCredentials(w http.ResponseWriter, r *http.Request) 
 	info, err := s.mgr.GetDatabase(r.Context(), projectName, env, prNumber)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "database not found")
+		return
+	}
+	var expiresAt *string
+	if info.ExpiresAt != nil {
+		t := info.ExpiresAt.Format(time.RFC3339)
+		expiresAt = &t
+	}
+	host, port, connStr := s.withPublicHost(r, info.DatabaseName, info.UserName, info.Password)
+	writeJSON(w, http.StatusOK, DatabaseResponse{
+		Project:      info.Project,
+		Env:          info.Env,
+		PRNumber:     info.PRNumber,
+		DatabaseName: info.DatabaseName,
+		UserName:     info.UserName,
+		Password:     info.Password,
+		Host:         host,
+		Port:         port,
+		ConnString:   connStr,
+		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
+		ExpiresAt:    expiresAt,
+	})
+}
+
+// rotateDatabasePassword issues a fresh password for the database's role and
+// returns the new credentials. Requires the same scope as reading the
+// database, since a caller who can read the password can already use it.
+func (s *Server) rotateDatabasePassword(w http.ResponseWriter, r *http.Request) {
+	projectName := chi.URLParam(r, "name")
+	env := chi.URLParam(r, "env")
+	prNumber, env, err := parseEnvParam(env)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: env}
+	if prNumber != nil {
+		scopeReq.PR = *prNumber
+	}
+	if !requireScope(w, r, scopeReq) {
+		return
+	}
+
+	var req RotatePasswordRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req) // body is optional
+	}
+
+	info, err := s.mgr.RotatePassword(r.Context(), projectName, env, prNumber, req.Terminate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	var expiresAt *string
