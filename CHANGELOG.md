@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.2](https://github.com/subhanmahmood/pgmanager/compare/v0.2.1...v0.2.2) (2026-07-28)
+
+
+### Features
+
+* **cli:** store bearer tokens in the macOS Keychain ([#28](https://github.com/subhanmahmood/pgmanager/issues/28)) ([92d0260](https://github.com/subhanmahmood/pgmanager/commit/92d0260405ec567deef99616578bafb9a7dc8dff))
+* **ui:** browse and edit database contents from the admin UI ([#31](https://github.com/subhanmahmood/pgmanager/issues/31)) ([0016cf5](https://github.com/subhanmahmood/pgmanager/commit/0016cf56e67218940f435243ed3c367c1920e71b))
+
 ## [0.2.1](https://github.com/subhanmahmood/pgmanager/compare/v0.2.0...v0.2.1) (2026-07-27)
 
 
