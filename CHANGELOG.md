@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/subhanmahmood/pgmanager/compare/v0.2.2...v0.2.3) (2026-07-28)
+
+
+### Features
+
+* **cli:** add `db rotate` to change a database user's password ([#32](https://github.com/subhanmahmood/pgmanager/issues/32)) ([2b32a6a](https://github.com/subhanmahmood/pgmanager/commit/2b32a6a8d94baa71b592c20f781ac84b2b014370))
+
 ## [0.2.2](https://github.com/subhanmahmood/pgmanager/compare/v0.2.1...v0.2.2) (2026-07-28)
 
 
