@@ -160,10 +160,28 @@ current: prod
 profiles:
   prod:
     api_url: https://pgm.example.com
-    token: pgm_live_xxxxxxxxxxxxxxxx
+    token_source: keyring    # secret is in the macOS Keychain, not this file
+  legacy:
+    api_url: https://old.example.com
+    token: pgm_live_xxxxxxxxxxxxxxxx   # still supported; pre-keychain profiles
   server:
     socket: /run/pgmanager/pgmanager.sock
 ```
+
+**Where the token lives.** On macOS `pgmanager login` stores it in the Keychain
+(service `pgmanager`, account = profile name) and the file keeps only
+`token_source: keyring`. Everywhere else it stays in the file at `0600`, because
+the Linux Secret Service is often absent and, where present, is readable by any
+process running as the same user anyway — it would add a failure mode without
+adding a boundary. `PGMANAGER_NO_KEYRING=1` forces the file on macOS too.
+
+A plaintext `token:` is always read, so profiles saved before this keep working.
+`pgmanager auth migrate-keychain` moves them into the Keychain; it writes the
+secret there before removing it from the file, so an interrupted run cannot lose
+the token. `pgmanager logout` deletes the Keychain entry along with the profile.
+
+CI is unaffected: `PGMANAGER_API_URL`/`PGMANAGER_API_TOKEN` bypass the file and
+the keychain entirely.
 
 On the server you usually need no profile at all — the CLI probes for the socket by itself.
 
@@ -195,6 +213,7 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 - `PGMANAGER_BOOTSTRAP_TOKEN` — operator-supplied initial admin token (skip auto-generation).
 - `PGMANAGER_API_URL` / `PGMANAGER_API_TOKEN` — client-side; bypass profile file.
 - `PGMANAGER_PROFILE` — pick a saved profile by name.
+- `PGMANAGER_NO_KEYRING` — client-side; set to anything to keep tokens in `credentials.yaml` instead of the macOS Keychain.
 
 ## Architecture
 

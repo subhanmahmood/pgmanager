@@ -23,10 +23,79 @@ type ClientConfig struct {
 // Profile describes one connection target: either APIURL (a remote
 // `pgmanager serve` over HTTPS) or Socket (a local one over a unix socket).
 // APIURL takes precedence if both happen to be present.
+//
+// The bearer token is reached through Token()/SetToken() rather than read off
+// the struct, because it may not be in this file at all — see TokenSource.
 type Profile struct {
 	APIURL string `yaml:"api_url,omitempty"`
-	Token  string `yaml:"token,omitempty"`
-	Socket string `yaml:"socket,omitempty"`
+	// TokenValue is the token when it is stored in credentials.yaml. It is
+	// empty for keychain-backed profiles. Prefer Token(); this field is
+	// exported only because the YAML encoder needs it to be.
+	TokenValue string `yaml:"token,omitempty"`
+	// TokenSource is "keyring" when the token lives in the OS keychain under
+	// service "pgmanager" (see keyringAccount for the account name). Empty
+	// means TokenValue.
+	TokenSource string `yaml:"token_source,omitempty"`
+	Socket      string `yaml:"socket,omitempty"`
+}
+
+// Token returns the profile's bearer token, reading the OS keychain when that
+// is where it lives. An empty string with a nil error means the profile has no
+// token — a keychain-backed profile whose entry has been deleted looks the
+// same as one that never had a token, and the fix is the same: log in again.
+func (p *Profile) Token(name string) (string, error) {
+	if p.TokenSource == TokenSourceKeyring {
+		return keyringGet(name)
+	}
+	return p.TokenValue, nil
+}
+
+// HasToken reports whether a token is available, for status output that would
+// rather show "unknown" than fail. A keychain read can prompt on some
+// configurations, which is why callers that only need to *display* status use
+// this and callers that need the secret use Token().
+func (p *Profile) HasToken(name string) bool {
+	tok, err := p.Token(name)
+	return err == nil && tok != ""
+}
+
+// SetToken stores the token wherever this machine keeps secrets, updating the
+// profile to record which that was. On macOS it goes to the Keychain and the
+// file records only a pointer; everywhere else it goes in the file at 0600.
+//
+// The caller still has to SaveClient to persist the profile itself.
+func (p *Profile) SetToken(name, token string) error {
+	if keyringSupported() {
+		if err := keyringSet(name, token); err != nil {
+			return err
+		}
+		p.TokenValue = ""
+		p.TokenSource = TokenSourceKeyring
+		return nil
+	}
+	// Switching a keychain-backed profile to the file (PGMANAGER_NO_KEYRING on
+	// a Mac) would otherwise leave the previous, still-valid token in the
+	// keychain with nothing recording that it is there — logout could never
+	// remove it. Best-effort, because on a host with no keychain at all this
+	// must not turn a successful login into an error.
+	if p.TokenSource == TokenSourceKeyring {
+		_ = keyringDelete(name)
+	}
+	p.TokenValue = token
+	p.TokenSource = ""
+	return nil
+}
+
+// ClearToken removes the profile's token from wherever it is stored. Called on
+// logout, so that dropping a profile from the file doesn't strand its secret
+// in the keychain forever.
+func (p *Profile) ClearToken(name string) error {
+	p.TokenValue = ""
+	if p.TokenSource == TokenSourceKeyring {
+		p.TokenSource = ""
+		return keyringDelete(name)
+	}
+	return nil
 }
 
 // Mode returns how the profile reaches pgmanager: "api" (remote HTTP) or
@@ -138,9 +207,11 @@ func ResolveProfile(cfg *ClientConfig, explicit string) (string, *Profile, error
 	// Env-only mode: PGMANAGER_API_URL bypasses the file entirely. This is
 	// the canonical CI path — no profile file required.
 	if envURL := os.Getenv("PGMANAGER_API_URL"); envURL != "" && explicit == "" && os.Getenv("PGMANAGER_PROFILE") == "" {
+		// Never keychain-backed: the environment *is* the source, which is why
+		// CI works on a machine with no keychain and no credentials file.
 		return "env", &Profile{
-			APIURL: envURL,
-			Token:  os.Getenv("PGMANAGER_API_TOKEN"),
+			APIURL:     envURL,
+			TokenValue: os.Getenv("PGMANAGER_API_TOKEN"),
 		}, nil
 	}
 
