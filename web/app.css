@@ -270,6 +270,7 @@ dd { font-family: ui-monospace, Menlo, monospace; font-size: 0.85em; word-break:
 .explore-tables .list { gap: 2px; max-height: 60vh; overflow-y: auto; }
 .explore h3 { margin-bottom: 10px; }
 .table-item {
+    flex-shrink: 0;
     text-align: left;
     font-family: ui-monospace, Menlo, monospace;
     overflow: hidden;
