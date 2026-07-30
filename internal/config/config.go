@@ -54,9 +54,10 @@ type APIConfig struct {
 	RequireToken   bool     `yaml:"require_token"`   // if true, refuse to start without auth
 	AllowedOrigins []string `yaml:"allowed_origins"` // CORS allowed origins
 
-	// WebDir is the directory holding the static admin UI. Empty means "./web"
-	// if that directory exists; set to "-" to disable serving the UI entirely
-	// (e.g. on a server that should expose the JSON API only).
+	// WebDir is the directory holding the built admin UI. Empty means
+	// "./web/dist" if that directory exists (web/ itself holds the Vite
+	// sources); set to "-" to disable serving the UI entirely (e.g. on a
+	// server that should expose the JSON API only).
 	WebDir string `yaml:"web_dir"`
 
 	// Socket is an optional unix socket path for local admin access. Anyone

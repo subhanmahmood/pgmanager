@@ -1,0 +1,11 @@
+# The Go builder does `COPY . .`; none of this belongs in the build context.
+.git/
+.github/
+data/
+web/node_modules/
+web/src/
+web/public/
+web/*.json
+web/*.ts
+examples/
+*.md

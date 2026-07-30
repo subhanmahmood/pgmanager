@@ -1,0 +1,203 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+/* Self-hosted: `default-src 'self'` rules out a font CDN. Declared by hand
+   rather than importing the fontsource stylesheets, which pull in the cyrillic,
+   greek and vietnamese subsets too — about 100 kB nobody here is reading. */
+@font-face {
+  font-family: 'Inter Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('@fontsource-variable/inter/files/inter-latin-wght-normal.woff2') format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url('@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2')
+    format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* Environment accents. Semantic, so a badge never hardcodes a hex. */
+  --color-env-dev: var(--env-dev);
+  --color-env-staging: var(--env-staging);
+  --color-env-prod: var(--env-prod);
+  --color-env-pr: var(--env-pr);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+:root {
+  --radius: 0.625rem;
+
+  --background: oklch(0.995 0 0);
+  --foreground: oklch(0.19 0.01 265);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.19 0.01 265);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.19 0.01 265);
+  /* Same hue as the old #3ea8ff, darkened so it passes contrast on white. */
+  --primary: oklch(0.58 0.15 245);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.965 0.003 265);
+  --secondary-foreground: oklch(0.28 0.012 265);
+  --muted: oklch(0.965 0.003 265);
+  --muted-foreground: oklch(0.5 0.014 265);
+  --accent: oklch(0.955 0.005 265);
+  --accent-foreground: oklch(0.24 0.012 265);
+  --destructive: oklch(0.55 0.2 27);
+  --destructive-foreground: oklch(0.99 0 0);
+  --success: oklch(0.58 0.13 158);
+  --warning: oklch(0.62 0.14 70);
+  --border: oklch(0.915 0.005 265);
+  --input: oklch(0.9 0.006 265);
+  --ring: oklch(0.58 0.15 245);
+
+  --env-dev: oklch(0.52 0.02 265);
+  --env-staging: oklch(0.6 0.14 70);
+  --env-prod: oklch(0.55 0.2 27);
+  --env-pr: oklch(0.55 0.15 245);
+
+  /* Dev-tool surfaces lean on borders; shadows stay near-invisible. */
+  --shadow-subtle: 0 1px 2px 0 oklch(0.2 0.02 265 / 0.05);
+  --shadow-raised: 0 4px 16px -4px oklch(0.2 0.02 265 / 0.12);
+}
+
+.dark {
+  --background: oklch(0.165 0.008 265);
+  --foreground: oklch(0.93 0.006 265);
+  --card: oklch(0.198 0.009 265);
+  --card-foreground: oklch(0.93 0.006 265);
+  --popover: oklch(0.212 0.01 265);
+  --popover-foreground: oklch(0.93 0.006 265);
+  /* The original accent, unchanged in hue — the product should still look like itself. */
+  --primary: oklch(0.72 0.14 245);
+  --primary-foreground: oklch(0.16 0.03 250);
+  --secondary: oklch(0.255 0.011 265);
+  --secondary-foreground: oklch(0.9 0.006 265);
+  --muted: oklch(0.245 0.01 265);
+  --muted-foreground: oklch(0.66 0.014 265);
+  --accent: oklch(0.27 0.013 265);
+  --accent-foreground: oklch(0.94 0.006 265);
+  --destructive: oklch(0.65 0.19 26);
+  --destructive-foreground: oklch(0.16 0.02 26);
+  --success: oklch(0.75 0.15 162);
+  --warning: oklch(0.78 0.14 76);
+  --border: oklch(0.285 0.012 265);
+  --input: oklch(0.32 0.013 265);
+  --ring: oklch(0.65 0.13 245);
+
+  --env-dev: oklch(0.68 0.015 265);
+  --env-staging: oklch(0.78 0.14 76);
+  --env-prod: oklch(0.68 0.18 26);
+  --env-pr: oklch(0.72 0.14 245);
+
+  --shadow-subtle: 0 1px 2px 0 oklch(0 0 0 / 0.3);
+  --shadow-raised: 0 8px 30px -8px oklch(0 0 0 / 0.5);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings:
+      'cv11',
+      'ss01';
+    font-size: 0.875rem;
+    line-height: 1.5;
+  }
+
+  /* Every interactive element gets a real ring. The old UI removed the outline
+     and only recoloured the border, which is invisible against a dark card. */
+  :focus-visible {
+    @apply outline-ring outline-2 outline-offset-2;
+  }
+
+  /* Digits should never reflow as values change. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  ::selection {
+    @apply bg-primary/25;
+  }
+}
+
+@layer utilities {
+  .shadow-subtle {
+    box-shadow: var(--shadow-subtle);
+  }
+  .shadow-raised {
+    box-shadow: var(--shadow-raised);
+  }
+}
+
+/* The scrollbars inside the explorer's panes are on screen constantly; the
+   platform default is a heavy grey slab in dark mode. */
+@supports selector(::-webkit-scrollbar) {
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-border rounded-full;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-muted-foreground/40;
+    background-clip: content-box;
+  }
+}

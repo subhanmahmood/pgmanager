@@ -133,7 +133,7 @@ postgres:        # how serve connects to Postgres
 api:
   listen: 127.0.0.1:8080  # bind address; put a proxy in front for TLS
   require_token: true
-  # web_dir — directory holding the static admin UI. Empty = "./web" if it
+  # web_dir — directory holding the built admin UI. Empty = "./web/dist" if it
   # exists; "-" disables the UI and serves the JSON API only.
   web_dir: ""
   # socket — optional unix socket for local admin access. Anyone who can open
@@ -238,7 +238,11 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 - `internal/config/config.go` — server config (`pgmanager.yaml`) loader.
 - `internal/config/client.go` — client config (`credentials.yaml`) loader + profile resolution.
 - `internal/tui/app.go` — Bubble Tea terminal UI; uses `client.Client`, so it works against either transport.
-- `web/` — static admin UI (`index.html` + `app.css` + `app.js`), served by `pgmanager serve` on the same origin as `/api`. The server sends a strict CSP (`script-src 'self'; style-src 'self'`), so the UI must not use inline scripts, inline styles or inline event handlers — all wiring goes through delegated listeners on `data-action` attributes in `app.js`.
+- `web/` — the admin UI: a Vite + React + TypeScript + Tailwind v4 + shadcn/ui app, served by `pgmanager serve` on the same origin as `/api`. Source in `web/src`, build output in `web/dist`, **which is committed** so `go run` and the Docker image need no Node toolchain (CI fails if it is stale). `npm --prefix web run dev` proxies `/api` to `:8080`.
+  - Layout: `src/lib` (typed API client mirroring the Go structs, query client, scope predicates mirroring `internal/auth`, formatters), `src/hooks/queries.ts` (all TanStack Query hooks), `src/components/ui` (generated shadcn, left untouched), `src/components` (app-specific), `src/routes` (one file per screen).
+  - **`script-src` stays `'self'`.** No inline scripts, ever — that is why the no-flash theme bootstrap is a real file (`web/public/theme-init.js`) and why `vite.config.ts` sets `modulePreload.polyfill: false` and `assetsInlineLimit: 0` (an inline polyfill and `data:` URIs would both be blocked). `style-src` allows `'unsafe-inline'` because Radix injects a `<style>` element to lock scrolling behind modals; see the comment in `internal/api/middleware.go`.
+  - **401 signs the user out; 403 does not.** A bearer token scoped to one project legitimately gets 403 from `/auth/tokens`, so 403 renders a per-view "not permitted" state. `whoami` and the login mutation opt out of the global 401 handler — those 401s are answers, not expiry.
+  - Secrets are fetched only on explicit action, never on page load, and the credentials query uses `gcTime: 0`. `SecretDialog` cannot be dismissed by backdrop or Escape.
 
 ### Key design rules
 

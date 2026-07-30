@@ -26,6 +26,45 @@ jobs:
       - name: Build
         run: go build -o pgmanager ./cmd/pgmanager
 
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      # web/dist is committed so the Go server has a UI without a Node
+      # toolchain. If the build output drifts from the source, say so here
+      # rather than shipping a stale bundle.
+      - name: Committed build output is up to date
+        run: |
+          if [ -n "$(git status --porcelain dist)" ]; then
+            echo "web/dist is stale. Run 'npm --prefix web run build' and commit the result."
+            git status --porcelain dist
+            git diff --stat dist
+            exit 1
+          fi
+
   lint:
     runs-on: ubuntu-latest
     steps:

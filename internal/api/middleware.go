@@ -176,8 +176,16 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		// Strict CSP: this is a JSON API plus an optional static SPA we serve
-		// from ./web. No inline scripts/styles permitted.
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
+		// from ./web/dist. No inline scripts — script-src stays 'self', which is
+		// the boundary that actually stops injected markup from executing.
+		//
+		// style-src allows 'unsafe-inline' because the admin UI's dialog
+		// primitives (Radix, via react-remove-scroll-bar) inject a <style>
+		// element to lock background scrolling. Without it that fails silently:
+		// no exception, the page just scrolls behind every modal. The residual
+		// risk is CSS-based exfiltration, which already requires the ability to
+		// inject markup that script-src forbids.
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
 		next.ServeHTTP(w, r)

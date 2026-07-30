@@ -165,9 +165,15 @@ from the server, then `rm bootstrap-token.txt`.
 
 ## Admin UI
 
-`pgmanager serve` also hosts a static browser UI from its `./web` directory —
-projects, databases, connection credentials, token management and PR cleanup,
-against the same `/api` endpoints the CLI uses.
+`pgmanager serve` also hosts a browser UI from `./web/dist` — projects,
+databases, connection credentials, password rotation, a data explorer, token
+management and PR cleanup, against the same `/api` endpoints the CLI uses.
+
+It is a React app (Vite + Tailwind + shadcn/ui) whose source lives in `web/`;
+the built assets in `web/dist` are committed, so a plain `go run` or the Docker
+image serves the UI with no Node toolchain involved. See "Working on the admin
+UI" below if you want to change it. Dark and light themes both ship, following
+your system preference unless you pick one.
 
 The bundled Deployment serves it on the same hostname as the API, at `/`. One
 DNS record, one certificate, and the UI calls `/api` same-origin — so no CORS
@@ -179,11 +185,18 @@ that can only be edited on the server (see below), and the session is an
 `HttpOnly` cookie — no token is ever pasted into a browser, and script on the
 page cannot read the credential.
 
-Each database row has an **Explore** button, which opens a page for that one
-database (`#explore/<project>/<env>` — a linkable, reloadable URL): its tables
-down the left, a page of rows on the right, and insert / edit / delete for
-individual rows. Editing addresses a row by its primary key, so a table without
-one is read-only there. The server connects as that database's own role, never
+Each database has its own page (`/projects/<project>/databases/<env>`) with its
+connection details, a table listing, and the destructive actions. **Rotate
+password** issues a new password and optionally terminates open connections;
+it asks you to type the database name first whenever the blast radius warrants
+it (production, or terminating connections).
+
+From there, **Browse data** opens the explorer
+(`/projects/<project>/databases/<env>/explore` — a linkable, reloadable URL, and
+the selected table and page live in the query string): its tables down the left,
+a page of rows on the right, and insert / edit / delete for individual rows.
+Editing addresses a row by its primary key, so a table without one is read-only
+there. The server connects as that database's own role, never
 the Postgres admin role, so the explorer can only reach what those credentials
 already reach — and the routes carry the same scope check as the rest of
 `/projects/{name}/databases/{env}`, meaning a token scoped to one project's PR
@@ -198,6 +211,23 @@ a person rather than another token.
 
 Set `PGMANAGER_WEB_DIR` (or `api.web_dir`) to serve the UI from elsewhere, or to
 `-` to run API-only.
+
+### Working on the admin UI
+
+Only needed if you are changing the UI itself.
+
+```bash
+npm --prefix web install
+go run ./cmd/pgmanager serve          # API on :8080
+npm --prefix web run dev              # UI on :5173, /api proxied to :8080
+```
+
+`npm --prefix web run build` writes `web/dist`, **which is committed** — CI
+fails if it drifts from the source, so rebuild and commit it with any UI change.
+
+The Vite dev server sends no CSP, so a violation that would break production is
+invisible there. `npm --prefix web run preflight` builds and serves through the
+Go server; run it before pushing and keep the browser console clean.
 
 ## CLI commands
 

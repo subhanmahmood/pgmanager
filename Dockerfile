@@ -25,8 +25,10 @@ RUN apk add --no-cache ca-certificates tzdata
 
 COPY --from=builder /app/pgmanager /usr/local/bin/pgmanager
 
-# Static SPA (optional). Served from ./web at runtime if present.
-COPY web/ /app/web/
+# Static SPA (optional). Served from ./web at runtime if present. Only the
+# built output is copied — the Vite sources in web/ are not needed at runtime,
+# and dist is committed so no Node stage is required here.
+COPY web/dist/ /app/web/dist/
 
 # Data directory for the bootstrap-token file and any future on-disk state.
 ENV PGMANAGER_DATA_DIR=/var/lib/pgmanager

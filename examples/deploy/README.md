@@ -125,7 +125,8 @@ the session is an `HttpOnly` cookie, so script on the page cannot read it, and
 the account allowlist can only be edited here on the server.
 
 To run without the UI (API only), set `PGMANAGER_WEB_DIR=-` on the `pgmanager`
-service. The API keeps working on the same hostname.
+service. The API keeps working on the same hostname. The image ships the UI
+prebuilt at `/app/web/dist`, which is where `pgmanager serve` looks by default.
 
 ---
 
