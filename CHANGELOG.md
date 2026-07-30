@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.4](https://github.com/subhanmahmood/pgmanager/compare/v0.2.3...v0.2.4) (2026-07-30)
+
+
+### Features
+
+* **web:** overhaul admin UI with React and Vite ([#37](https://github.com/subhanmahmood/pgmanager/issues/37)) ([9880e94](https://github.com/subhanmahmood/pgmanager/commit/9880e94d724330da31b2cc0543f153a2ace00110))
+
+
+### Bug Fixes
+
+* keep explorer table items readable ([#35](https://github.com/subhanmahmood/pgmanager/issues/35)) ([b0bf371](https://github.com/subhanmahmood/pgmanager/commit/b0bf371c9b0719726b6aa76cfae8db06aaf26b7a))
+
 ## [0.2.3](https://github.com/subhanmahmood/pgmanager/compare/v0.2.2...v0.2.3) (2026-07-28)
 
 
