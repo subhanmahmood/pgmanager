@@ -96,14 +96,28 @@ export function ExplorerPage() {
     queryKey: keys.rows(name, env, schema, table, limit, offset),
     queryFn: () => api.listRows(name, env, table, { schema, limit, offset }),
     enabled: Boolean(table),
-    placeholderData: (prev) => prev,
+    // Keep the previous page on screen while the next one loads, but ONLY
+    // within the same table. Carrying rows across a table switch is actively
+    // dangerous: the mutations address `table` (already the new one) with a key
+    // taken from a row belonging to the old one, so deleting the row you can
+    // see destroys the same-id row in a different table. Paging is the case
+    // this is for, and paging keeps the identity fixed.
+    placeholderData: (prev, prevQuery) => {
+      const key = prevQuery?.queryKey as ReturnType<typeof keys.rows> | undefined
+      return key && key[3] === schema && key[4] === table ? prev : undefined
+    },
   })
 
   const pk = useMemo(
     () => (page.data ? primaryKeyColumns(page.data.columns) : []),
     [page.data],
   )
-  const readOnly = Boolean(page.data) && pk.length === 0
+  // A primary key is needed to address one existing row, so update and delete
+  // require one. Insert does not — the server builds the INSERT from whatever
+  // columns are supplied (internal/db/explore.go InsertRow), and ErrNoPrimaryKey
+  // is raised only by update and delete.
+  const canModifyRows = Boolean(page.data) && pk.length > 0
+  const noPrimaryKey = Boolean(page.data) && pk.length === 0
 
   const rowKeyOf = (row: Row): Row => Object.fromEntries(pk.map((c) => [c, row[c]]))
 
@@ -217,17 +231,18 @@ export function ExplorerPage() {
           <span className="truncate font-mono text-sm font-medium">
             {table ? `${schema}.${table}` : 'No table selected'}
           </span>
-          {readOnly && (
+          {noPrimaryKey && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Badge variant="outline" className="shrink-0 gap-1 text-[11px]">
                   <KeyRound className="size-3" />
-                  read-only
+                  no primary key
                 </Badge>
               </TooltipTrigger>
               <TooltipContent className="max-w-xs">
-                This table has no primary key, so a row cannot be identified unambiguously. The
-                server refuses updates and deletes rather than risk matching more than one row.
+                Without a primary key a row cannot be identified unambiguously, so the server
+                refuses updates and deletes rather than risk matching more than one row. Inserting
+                is still fine.
               </TooltipContent>
             </Tooltip>
           )}
@@ -243,7 +258,7 @@ export function ExplorerPage() {
             >
               <RotateCw className={cn('size-4', page.isFetching && 'animate-spin')} />
             </Button>
-            {table && !readOnly && (
+            {table && page.data && (
               <Button
                 size="sm"
                 onClick={() => {
@@ -281,21 +296,21 @@ export function ExplorerPage() {
             <EmptyState
               icon={Table2}
               title="No rows"
-              description={readOnly ? undefined : 'This table is empty.'}
+              description="This table is empty."
               action={
-                !readOnly && (
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setRowMode('insert')
-                      setEditing(null)
-                      setRowOpen(true)
-                    }}
-                  >
-                    <Plus className="size-4" />
-                    Insert the first row
-                  </Button>
-                )
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setRowMode('insert')
+                    setEditing(null)
+                    insertRow.reset()
+                    setRowOpen(true)
+                  }}
+                >
+                  <Plus className="size-4" />
+                  Insert the first row
+                </Button>
+
               }
             />
           ) : (
@@ -320,7 +335,7 @@ export function ExplorerPage() {
                       </Tooltip>
                     </TableHead>
                   ))}
-                  {!readOnly && <TableHead className="w-px" />}
+                  {canModifyRows && <TableHead className="w-px" />}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -331,7 +346,7 @@ export function ExplorerPage() {
                         <Cell value={row[col.name]} />
                       </TableCell>
                     ))}
-                    {!readOnly && (
+                    {canModifyRows && (
                       <TableCell className="w-px">
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
