@@ -1,0 +1,17 @@
+# Postgres only, for local development of pgmanager itself.
+# The production deployment lives in examples/deploy/.
+#
+#   docker compose -f docker-compose.dev.yml up -d
+#   go run ./cmd/pgmanager serve
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: pgmanager-dev
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

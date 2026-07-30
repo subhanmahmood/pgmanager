@@ -148,7 +148,10 @@ func (s *Server) webDir() string {
 		return ""
 	}
 	if dir == "" {
-		dir = "./web"
+		// The admin UI is a Vite app: web/ holds the source, web/dist holds the
+		// built assets that actually get served. dist is committed, so a plain
+		// `go run` still has a UI without a Node toolchain.
+		dir = "./web/dist"
 	}
 	info, err := os.Stat(dir)
 	if err != nil || !info.IsDir() {
