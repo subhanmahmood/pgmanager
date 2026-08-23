@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -179,6 +180,44 @@ func (c *HTTPClient) RotatePassword(ctx context.Context, projectName, env string
 
 func (c *HTTPClient) DeleteDatabase(ctx context.Context, projectName, env string, prNumber *int) error {
 	return c.do(ctx, http.MethodDelete, dbPath(projectName, env, prNumber), nil, nil)
+}
+
+func (c *HTTPClient) SetBackupsEnabled(ctx context.Context, projectName, env string, prNumber *int, enabled bool) error {
+	path := dbPath(projectName, env, prNumber) + "/backup"
+	body := map[string]bool{"enabled": enabled}
+	return c.do(ctx, http.MethodPut, path, body, nil)
+}
+
+func (c *HTTPClient) ListBackups(ctx context.Context, projectName, env string, prNumber *int) ([]Backup, error) {
+	path := dbPath(projectName, env, prNumber) + "/backups"
+	var out []Backup
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *HTTPClient) CreateBackup(ctx context.Context, projectName, env string, prNumber *int) (*Backup, error) {
+	path := dbPath(projectName, env, prNumber) + "/backups"
+	var out Backup
+	if err := c.do(ctx, http.MethodPost, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *HTTPClient) DeleteBackup(ctx context.Context, projectName, env string, prNumber *int, backupID int64) error {
+	path := dbPath(projectName, env, prNumber) + "/backups/" + strconv.FormatInt(backupID, 10)
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
+func (c *HTTPClient) RestoreBackup(ctx context.Context, projectName, env string, prNumber *int, backupID int64) (*Database, error) {
+	path := dbPath(projectName, env, prNumber) + "/backups/" + strconv.FormatInt(backupID, 10) + "/restore"
+	var out Database
+	if err := c.do(ctx, http.MethodPost, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func (c *HTTPClient) Cleanup(ctx context.Context, olderThan time.Duration) ([]string, error) {

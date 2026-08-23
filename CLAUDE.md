@@ -149,7 +149,22 @@ crypto:
 data_dir: /var/lib/pgmanager
 cleanup:
   default_ttl: 168h
+backup:                   # per-database backups to S3-compatible storage; opt-in
+  enabled: false           # false = the manager runs with backups disabled entirely
+  endpoint: ""              # empty = AWS S3; set for R2/B2/MinIO/etc.
+  region: ""
+  bucket: ""
+  prefix: "pgmanager/"      # always normalized to end in "/"
+  access_key_id: ""
+  secret_access_key: ""     # never logged, never put in an API response
+  # secret_access_key_file: /run/secrets/pgmanager_backup_key  # alternative
+  schedule: 24h              # how often the in-process scheduler sweeps due databases
+  retention: 7                # succeeded snapshots kept per database (failed ones separately)
 ```
+
+`serve` validates `backup.*` at startup only when `enabled: true`; a bad bucket/key/secret disables
+backups for that run (three `ERROR` log lines, `DisableBackups`) rather than refusing to start —
+database provisioning must not go down over a bucket typo. Never available for `pr` databases.
 
 ### `credentials.yaml` (client-side, used by every other command)
 
@@ -214,6 +229,11 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 - `PGMANAGER_API_URL` / `PGMANAGER_API_TOKEN` — client-side; bypass profile file.
 - `PGMANAGER_PROFILE` — pick a saved profile by name.
 - `PGMANAGER_NO_KEYRING` — client-side; set to anything to keep tokens in `credentials.yaml` instead of the macOS Keychain.
+- `PGMANAGER_BACKUP_ENABLED` — `true` to turn on per-database backups (default false).
+- `PGMANAGER_BACKUP_ENDPOINT` / `_REGION` / `_BUCKET` / `_PREFIX` — where backups go; empty endpoint means AWS S3.
+- `PGMANAGER_BACKUP_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` / `_SECRET_ACCESS_KEY_FILE` — how `serve` authenticates to the bucket; the secret is never logged and never enters an API response.
+- `PGMANAGER_BACKUP_SCHEDULE` — how often the in-process scheduler sweeps for due databases (Go duration; default `24h`). A bad value is silently ignored, same as `PGMANAGER_SESSION_TTL`.
+- `PGMANAGER_BACKUP_RETENTION` — succeeded snapshots kept per database (default `7`); failed snapshots are trimmed to the same count independently.
 
 ## Architecture
 
@@ -233,7 +253,10 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 - The email allowlist has **no HTTP handler at all**: `pgmanager users` (in `cmd/pgmanager/main.go`) opens the store from the server config and edits it directly, the same way `serve` does. That is both the security property (no request can add a user) and the availability one (provisioning never depends on the API, the socket, or an existing account). `TestNoUserManagementOverHTTP` guards it.
 - `internal/auth/device.go` — device-authorization codes: the secret `device_code` the CLI polls with, and the short human-typed `user_code` (`XXXX-XXXX`, ambiguous characters excluded).
 - `internal/api/device_handlers.go` — the RFC 8628-shaped device flow. `POST /api/auth/device` and `POST /api/auth/device/token` are unauthenticated by design (see `anonymousPaths` in `auth.go`); listing/approving/denying requires the `token` scope.
-- `internal/db/explore.go` + `internal/api/explore_handlers.go` — the data explorer: list tables, page rows, insert/update/delete one row. It connects as the *database's own role* (`connectAs`), never the configured admin user, so it can only reach what those credentials already reach. Every identifier that ends up in SQL is checked against the live catalog first (`describe` → `checkColumn`); values are always `$n` parameters. Update and delete require a key naming *exactly* the primary key, so a request can never widen the match beyond one row, and a table without a primary key is read-only. Routes hang off `/projects/{name}/databases/{env}/tables…` and reuse the same `parseEnvParam` + `requireScope` idiom as the other database routes.
+- `internal/db/explore.go` + `internal/api/explore_handlers.go` — the data explorer: list tables, page rows, insert/update/delete one row. It connects as the *database's own role* (`connectAs`), never the configured admin user, so it can only reach what those credentials already reach. Every identifier that ends up in SQL is checked against the live catalog first (`describe` → `checkColumn`); values are always `$n` parameters. Update and delete require a key naming *exactly* the primary key, so a request can never widen the match beyond one row, and a table without a primary key is read-only. Routes hang off `/projects/{name}/databases/{env}/tables…` and reuse the same `databaseTarget` + `requireScope` idiom as the backup routes below (this helper was `exploreTarget` before backups shared it).
+- `internal/backup/` — the S3 engine, with no callers of its own. `ObjectStore` (`Put`/`Get`/`Delete`) is the seam: `s3.go`'s `NewS3Store` is the only thing that talks to S3 (`aws-sdk-go-v2`), and `memory.go`'s `MemoryStore` is what every other package's tests use instead, with injectable failure knobs (`PutErr`/`GetErr`/`DeleteErr`/`FailPutAfterBytes`) to simulate a bucket that vanishes mid-upload. `pgtools.go`'s `Dumper` shells out to `pg_dump -Fc`/`pg_restore`, connecting as the *database's own role* like `explore.go`'s `connectAs`, and always puts the password in `PGPASSWORD` (env), never argv. `key.go`'s `ObjectKey` lays out `{prefix}{project}/{dbName}/{RFC3339-ish timestamp}.dump`.
+- `internal/project/backup.go` + `internal/project/restore.go` — the manager's backup/restore surface. `Manager.EnableBackups`/`DisableBackups` (called once at `serve` startup, never mid-request) wire in an `ObjectStore` and `Dumper`; every other backup method 503s via `ErrBackupsDisabled` until that happens, and 400s via `ErrBackupsNotForPR` for `env=pr`. `BackupNow`/`RunDueBackups` share one `io.Pipe`-based flow (`pg_dump` writes into the pipe from a goroutine, `ObjectStore.Put` reads the other end) — every exit path must `CloseWithError` both ends or the dump goroutine leaks forever; `RunDueBackups` runs on an in-process ticker (`backup.schedule`) and is never fatal per-database. `applyRetention` deletes the S3 object before the metadata row, keeping only the newest `retention` succeeded rows (and, independently, the newest `retention` failed rows). `RestoreBackup` always creates a **new** database (`{project}_{env}_restore_{timestamp}`, its own role, `CreateRestoredDatabase`) and never opens the source; on any failure after the create it drops what it made. Restored rows are invisible to `GetDatabase` (`restored_from IS NULL`) and reachable only by name — `resolveDatabase` tries the name probe first, then falls back to the normal `(project, env, pr)` lookup, so `GetDatabase`/`RotatePassword`/`DeleteDatabase` and the explorer all work unchanged against a restore once you have its addressable env segment.
+- `internal/api/backup_handlers.go` — `PUT .../backup` (toggle the schedule), `POST .../backups` (back up now), `GET .../backups` (list), `DELETE .../backups/{id}`, `POST .../backups/{id}/restore`, all under `/projects/{name}/databases/{env}/...`. `{env}` on all five is always the *source* database's env (never a restore segment — backing up a restore isn't supported); a restored database is reached by putting its full addressable segment (`prod_restore_20260823T101500`) in `{env}` on every *other* database route instead. `handlers.go`'s `scopeEnv` maps that segment back to its source env (`prod`) for the scope check, while the manager still gets the raw segment — a token scoped to one env can't reach a restore of a different one just because the restore's name doesn't literally match. Errors: `ErrBackupsDisabled`→503, `ErrBackupsNotForPR`→400, `ErrBackupNotFound`→404, `ErrBackupNotRestorable`→400 (backup exists but isn't `succeeded` yet); the configured S3 secret is asserted to never appear in a response body.
 - `internal/crypto/aesgcm.go` — AES-256-GCM for at-rest secrets.
 - `internal/config/config.go` — server config (`pgmanager.yaml`) loader.
 - `internal/config/client.go` — client config (`credentials.yaml`) loader + profile resolution.
@@ -248,8 +271,8 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 
 - Project names: regex `^[a-z][a-z0-9_]*$`, length 2–32. Reserved: `postgres`, `template0`, `template1`, `admin`, `root`, `system`.
 - Environments: `prod`, `dev`, `staging`, `pr`.
-- Database naming: `{project}_{env}` or `{project}_pr_{number}`.
-- PR DBs get a TTL (default 7 days); `pgmanager cleanup` removes expired ones.
+- Database naming: `{project}_{env}` or `{project}_pr_{number}`; a restored database is `{project}_{env}_restore_{timestamp}` (`20060102T150405`, UTC) and is addressed by that whole string in the `{env}` slot of every database route — it is never itself backed up or swept by `cleanup`.
+- PR DBs get a TTL (default 7 days); `pgmanager cleanup` removes expired ones. Backups never exist for `pr` databases.
 - Token format: `pgm_live_<32 url-safe bytes>`. Only SHA-256 stored. Display prefix is the first 16 chars.
 - SQL injection prevention everywhere via `pgx.Identifier{}.Sanitize()` and `quoteLiteral` for passwords.
 - DB passwords in metadata are AES-GCM encrypted; the key never lives in the DB.

@@ -294,9 +294,138 @@ func newDBCmd() *cobra.Command {
 	rotateCmd.Flags().BoolVarP(&verboseRotate, "verbose", "v", false,
 		"print the full credentials instead of just the new password")
 
+	var enableBackups, disableBackups bool
+	backupCmd := &cobra.Command{
+		Use:   "backup <project> <env> [pr-number]",
+		Short: "Back up a database now, or toggle scheduled backups",
+		Long: "With no flags, runs an on-demand backup immediately and prints the resulting\n" +
+			"snapshot. --enable/--disable instead flip whether the server's scheduler backs\n" +
+			"this database up automatically; they take effect immediately and do not run a\n" +
+			"backup themselves. Not available for PR databases (env pr) — the server rejects\n" +
+			"those with a 400.",
+		Args: cobra.RangeArgs(2, 3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			project, env, prNumber, err := parseDBArgs(args)
+			if err != nil {
+				return err
+			}
+			c, _, err := getClient()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+
+			if enableBackups || disableBackups {
+				enabled := enableBackups
+				if err := c.SetBackupsEnabled(ctx, project, env, prNumber, enabled); err != nil {
+					return err
+				}
+				return emit(map[string]bool{"backups_enabled": enabled}, func() {
+					if enabled {
+						fmt.Println("Scheduled backups enabled")
+					} else {
+						fmt.Println("Scheduled backups disabled")
+					}
+				})
+			}
+
+			b, err := c.CreateBackup(ctx, project, env, prNumber)
+			if err != nil {
+				return err
+			}
+			return emit(b, func() {
+				fmt.Printf("Backup started: id=%d status=%s\n", b.ID, b.Status)
+			})
+		},
+	}
+	backupCmd.Flags().BoolVar(&enableBackups, "enable", false,
+		"enable scheduled backups for this database instead of backing up now")
+	backupCmd.Flags().BoolVar(&disableBackups, "disable", false,
+		"disable scheduled backups for this database instead of backing up now")
+	backupCmd.MarkFlagsMutuallyExclusive("enable", "disable")
+
+	backupsCmd := &cobra.Command{
+		Use:   "backups <project> <env> [pr-number]",
+		Short: "List backup snapshots for a database",
+		Args:  cobra.RangeArgs(2, 3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			project, env, prNumber, err := parseDBArgs(args)
+			if err != nil {
+				return err
+			}
+			c, _, err := getClient()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			list, err := c.ListBackups(ctx, project, env, prNumber)
+			if err != nil {
+				return err
+			}
+			return emit(list, func() {
+				if len(list) == 0 {
+					fmt.Println("No backups found")
+					return
+				}
+				fmt.Printf("%-6s %-10s %-10s %-20s %-20s\n", "ID", "STATUS", "SIZE", "STARTED", "FINISHED")
+				fmt.Println(strings.Repeat("-", 72))
+				for _, b := range list {
+					finished := "-"
+					if b.FinishedAt != nil {
+						finished = formatBackupTimestamp(*b.FinishedAt)
+					}
+					fmt.Printf("%-6d %-10s %-10s %-20s %-20s\n",
+						b.ID, b.Status, humanBytes(b.SizeBytes), formatBackupTimestamp(b.StartedAt), finished)
+					if b.Status == "failed" && b.Error != "" {
+						fmt.Printf("       error: %s\n", b.Error)
+					}
+				}
+			})
+		},
+	}
+
+	restoreCmd := &cobra.Command{
+		Use:   "restore <project> <env> <backup-id>",
+		Short: "Restore a backup into a new database",
+		Long: "Creates a brand-new database (its own role, its own credentials) from the given\n" +
+			"backup snapshot and prints the connection info. The source database named by\n" +
+			"<env> is never opened or written to.\n\n" +
+			"The printed/returned env is not <env> — it's a new value that includes a\n" +
+			"timestamp (e.g. prod_restore_20260823T101500). Copy it verbatim to reach the\n" +
+			"restored database with other `pgmanager db` commands.",
+		Args: cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			project := args[0]
+			env := args[1]
+			backupID, perr := strconv.ParseInt(args[2], 10, 64)
+			if perr != nil {
+				return fmt.Errorf("invalid backup id: %s", args[2])
+			}
+			c, _, err := getClient()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			info, err := c.RestoreBackup(ctx, project, env, nil, backupID)
+			if err != nil {
+				return err
+			}
+			return emit(info, func() {
+				fmt.Printf("Database restored. New env: %s\n\n", envOf(info))
+				printCredentials(info)
+			})
+		},
+	}
+
 	cmd.AddCommand(
 		createCmd,
 		rotateCmd,
+		backupCmd,
+		backupsCmd,
+		restoreCmd,
 		&cobra.Command{
 			Use:   "delete <project> <env> [pr-number]",
 			Short: "Delete a database",
@@ -1436,6 +1565,32 @@ func envOf(d *client.Database) string {
 		return fmt.Sprintf("pr %d", *d.PRNumber)
 	}
 	return d.Env
+}
+
+// humanBytes renders a byte count the way `ls -h`/`du -h` do: the smallest
+// unit that keeps the number under 1024, one decimal place above bytes.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// formatBackupTimestamp renders a BackupResponse's RFC3339 timestamp for
+// human display, falling back to the raw string if it doesn't parse (rather
+// than hiding a value the server did send).
+func formatBackupTimestamp(s string) string {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return s
+	}
+	return t.Local().Format("2006-01-02 15:04:05")
 }
 
 func printCredentials(d *client.Database) {

@@ -31,6 +31,20 @@ type Database struct {
 	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
 }
 
+// Backup is one stored dump of a database. Mirrors the API's
+// BackupResponse (internal/api/backup_handlers.go). Never available for pr
+// databases.
+type Backup struct {
+	ID           int64   `json:"id"`
+	DatabaseName string  `json:"database_name"`
+	ObjectKey    string  `json:"object_key"`
+	SizeBytes    int64   `json:"size_bytes"`
+	Status       string  `json:"status"` // "running" | "succeeded" | "failed"
+	Error        string  `json:"error,omitempty"`
+	StartedAt    string  `json:"started_at"`            // RFC3339
+	FinishedAt   *string `json:"finished_at,omitempty"` // RFC3339, nil while running
+}
+
 // Whoami describes the authenticated principal.
 type Whoami struct {
 	TokenPrefix string   `json:"token_prefix"`
@@ -67,6 +81,21 @@ type Client interface {
 	// connections, so holders of the old password must reconnect.
 	RotatePassword(ctx context.Context, project, env string, prNumber *int, terminate bool) (*Database, error)
 	DeleteDatabase(ctx context.Context, project, env string, prNumber *int) error
+
+	// Backups. env identifies the source database (prod/dev/staging, or pr —
+	// which the server always rejects, backups don't exist for PR databases).
+	// SetBackupsEnabled toggles the scheduled/automatic backup flag; it does
+	// not itself run a backup. CreateBackup runs one immediately.
+	SetBackupsEnabled(ctx context.Context, project, env string, prNumber *int, enabled bool) error
+	ListBackups(ctx context.Context, project, env string, prNumber *int) ([]Backup, error)
+	CreateBackup(ctx context.Context, project, env string, prNumber *int) (*Backup, error)
+	DeleteBackup(ctx context.Context, project, env string, prNumber *int, backupID int64) error
+	// RestoreBackup creates a brand-new database from a snapshot and returns
+	// its credentials, exactly like CreateDatabase. The source database is
+	// never opened. The returned Database's Env is the addressable segment
+	// for the new database ("{source-env}_restore_{timestamp}"), not the env
+	// passed in here — pass that whole string as env to reach it afterwards.
+	RestoreBackup(ctx context.Context, project, env string, prNumber *int, backupID int64) (*Database, error)
 
 	// Cleanup.
 	Cleanup(ctx context.Context, olderThan time.Duration) ([]string, error)
