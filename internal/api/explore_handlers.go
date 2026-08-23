@@ -16,9 +16,9 @@ import (
 // database route, so a token scoped to one project's PR databases can explore
 // exactly those and nothing else.
 
-// exploreTarget resolves the project/env path params and enforces scope. It
+// databaseTarget resolves the project/env path params and enforces scope. It
 // returns false if it has already written a response.
-func exploreTarget(w http.ResponseWriter, r *http.Request) (projectName, env string, prNumber *int, ok bool) {
+func databaseTarget(w http.ResponseWriter, r *http.Request) (projectName, env string, prNumber *int, ok bool) {
 	projectName = chi.URLParam(r, "name")
 	prNumber, env, err := parseEnvParam(chi.URLParam(r, "env"))
 	if err != nil {
@@ -70,7 +70,7 @@ type tablesResponse struct {
 }
 
 func (s *Server) listTables(w http.ResponseWriter, r *http.Request) {
-	projectName, env, prNumber, ok := exploreTarget(w, r)
+	projectName, env, prNumber, ok := databaseTarget(w, r)
 	if !ok {
 		return
 	}
@@ -83,7 +83,7 @@ func (s *Server) listTables(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listRows(w http.ResponseWriter, r *http.Request) {
-	projectName, env, prNumber, ok := exploreTarget(w, r)
+	projectName, env, prNumber, ok := databaseTarget(w, r)
 	if !ok {
 		return
 	}
@@ -100,7 +100,7 @@ func (s *Server) listRows(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createRow(w http.ResponseWriter, r *http.Request) {
-	projectName, env, prNumber, ok := exploreTarget(w, r)
+	projectName, env, prNumber, ok := databaseTarget(w, r)
 	if !ok {
 		return
 	}
@@ -121,7 +121,7 @@ func (s *Server) createRow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateRow(w http.ResponseWriter, r *http.Request) {
-	projectName, env, prNumber, ok := exploreTarget(w, r)
+	projectName, env, prNumber, ok := databaseTarget(w, r)
 	if !ok {
 		return
 	}
@@ -146,7 +146,7 @@ func (s *Server) updateRow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteRow(w http.ResponseWriter, r *http.Request) {
-	projectName, env, prNumber, ok := exploreTarget(w, r)
+	projectName, env, prNumber, ok := databaseTarget(w, r)
 	if !ok {
 		return
 	}

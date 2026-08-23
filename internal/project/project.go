@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"pgmanager/internal/backup"
 	"pgmanager/internal/config"
 	"pgmanager/internal/db"
 	"pgmanager/internal/meta"
@@ -44,6 +45,17 @@ type Manager struct {
 	cfg   *config.Config
 	pg    *db.PostgresClient
 	store meta.Store
+
+	// Backup wiring. Nil objects/dumper means backups are unavailable —
+	// every backup.go method must check that before touching either. See
+	// EnableBackups / DisableBackups.
+	objects   backup.ObjectStore
+	dumper    *backup.Dumper
+	backupCfg config.BackupConfig
+	// backupErr records why backups are disabled, so a caller asking for a
+	// backup gets a reason instead of a bare "disabled". Nil when backups
+	// were simply never enabled (e.g. backup.enabled: false).
+	backupErr error
 }
 
 // DatabaseInfo contains information about a database
