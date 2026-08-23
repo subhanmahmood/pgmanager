@@ -25,6 +25,12 @@ type Database struct {
 	PRNumber  *int   // only set for PR databases
 	CreatedAt time.Time
 	ExpiresAt *time.Time
+	// BackupsEnabled reports whether the scheduler should take periodic
+	// backups of this database. Never true for `pr` databases.
+	BackupsEnabled bool
+	// RestoredFrom holds the source backup's ID when this database was
+	// created by a restore, and is nil otherwise.
+	RestoredFrom *int64
 }
 
 // Token is an API token. The plaintext is only ever shown to the operator at
@@ -130,6 +136,26 @@ func (s *Session) Expired(now time.Time) bool { return !now.Before(s.ExpiresAt) 
 // password change, so the credential it was authorized by is already stale.
 var ErrPasswordChanged = errors.New("password changed during sign-in")
 
+// Backup snapshot statuses.
+const (
+	BackupStatusRunning   = "running"
+	BackupStatusSucceeded = "succeeded"
+	BackupStatusFailed    = "failed"
+)
+
+// Backup is one stored dump. It holds an object key, a size and a status —
+// never a credential.
+type Backup struct {
+	ID         int64
+	DatabaseID int64
+	Key        string
+	SizeBytes  int64
+	Status     string
+	Error      string
+	StartedAt  time.Time
+	FinishedAt *time.Time
+}
+
 // Store defines the interface for metadata storage.
 type Store interface {
 	Close() error
@@ -192,4 +218,14 @@ type Store interface {
 	GetSessionByHash(ctx context.Context, hash []byte) (*Session, error)
 	DeleteSession(ctx context.Context, hash []byte) error
 	DeleteExpiredSessions(ctx context.Context) (int, error)
+
+	// Backup operations.
+	SetBackupsEnabled(ctx context.Context, dbName string, enabled bool) error
+	ListBackupEnabledDatabases(ctx context.Context) ([]Database, error)
+	CreateBackup(ctx context.Context, databaseID int64, key string) (*Backup, error)
+	FinishBackup(ctx context.Context, id int64, size int64, status, errMsg string) error
+	GetBackup(ctx context.Context, id int64) (*Backup, error)
+	ListBackups(ctx context.Context, databaseID int64) ([]Backup, error) // newest first
+	DeleteBackup(ctx context.Context, id int64) error
+	CreateRestoredDatabase(ctx context.Context, projectID, backupID int64, name, userName, password, env string) (*Database, error)
 }
