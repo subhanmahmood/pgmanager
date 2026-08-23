@@ -320,13 +320,24 @@ func (s *Server) initBackups() chan struct{} {
 	log.Printf("Backups enabled: bucket %s, schedule %s, retention %d", s.cfg.Backup.Bucket, s.cfg.Backup.Schedule, s.cfg.Backup.Retention)
 
 	stop := make(chan struct{})
+
+	// The sweep runs on a context tied to stop, so shutting the server down
+	// cancels a backup already in flight instead of waiting out its own
+	// (bounded) deadline. RunDueBackups additionally bounds each database's
+	// backup individually — see scheduledBackupTimeout.
+	schedCtx, cancelSched := context.WithCancel(context.Background())
+	go func() {
+		<-stop
+		cancelSched()
+	}()
+
 	ticker := time.NewTicker(s.cfg.Backup.Schedule)
 	go func() {
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				if n, err := s.mgr.RunDueBackups(context.Background()); err != nil {
+				if n, err := s.mgr.RunDueBackups(schedCtx); err != nil {
 					log.Printf("ERROR [backup scheduler]: %v", err)
 				} else if n > 0 {
 					log.Printf("Backup scheduler: ran %d backup(s)", n)

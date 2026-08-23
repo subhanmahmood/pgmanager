@@ -392,7 +392,13 @@ func (s *Server) rotateDatabasePassword(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: env}
+	// scopeEnv, not the raw segment: RotatePassword resolves restored
+	// databases (it goes through resolveDatabase), so this route can be
+	// addressed at "prod_restore_<ts>" like getDatabase and deleteDatabase
+	// are. Authorizing the raw segment would leave rotation as the one
+	// operation a prod-scoped token could not perform on a database it can
+	// already read, browse and delete.
+	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: scopeEnv(env)}
 	if prNumber != nil {
 		scopeReq.PR = *prNumber
 	}

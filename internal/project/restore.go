@@ -57,6 +57,9 @@ func restoreDatabaseName(projectName, sourceEnv string, ts time.Time) (dbName, u
 // returns its credentials. The source database is never opened — this
 // method only ever reads the snapshot object from the object store and
 // writes into the freshly created database, as that database's own role.
+// (The one exception is extension creation, which Postgres allows only to a
+// superuser and which pgmanager has always done through the configured
+// admin: see preCreateExtensions.)
 //
 // On any failure after the new database is created, it is dropped before
 // the error is returned, so a partial restore never lingers.
@@ -149,12 +152,30 @@ func (m *Manager) rollbackRestore(ctx context.Context, dbName, userName string, 
 	}
 }
 
-// restoreSnapshotInto downloads the snapshot object and streams it directly
-// into pg_restore, connected as the new database's own role. Unlike
-// runBackup's dump path, this needs no io.Pipe: objects.Get already hands
-// back an io.Reader, and Restore already accepts one as pg_restore's stdin —
-// there is no writer side to pair up.
+// restoreSnapshotInto streams the snapshot object into pg_restore, connected
+// as the new database's own role. Unlike runBackup's dump path, this needs
+// no io.Pipe: objects.Get already hands back an io.Reader, and Restore
+// already accepts one as pg_restore's stdin — there is no writer side to
+// pair up.
+//
+// It reads the object twice. The first read is the archive's table of
+// contents only (pg_restore -l stops after the header, which in a custom
+// archive is the first megabyte or so), and it exists because the contents
+// decide two things: which extensions have to exist before the restore
+// starts, and which entries the restoring role must be told to skip. The
+// second read is the restore itself. An archive with no extensions in it
+// takes exactly the path it always did.
 func (m *Manager) restoreSnapshotInto(ctx context.Context, dbName, userName, password, key string) error {
+	toc, err := m.snapshotTOC(ctx, key)
+	if err != nil {
+		return err
+	}
+
+	if err := m.preCreateExtensions(ctx, dbName, toc); err != nil {
+		return err
+	}
+	tocList, skipped := backup.FilterExtensionEntries(toc)
+
 	rc, err := m.objects.Get(ctx, key)
 	if err != nil {
 		return fmt.Errorf("failed to fetch backup object: %w", err)
@@ -169,8 +190,75 @@ func (m *Manager) restoreSnapshotInto(ctx context.Context, dbName, userName, pas
 		Password: password,
 		SSLMode:  m.cfg.Postgres.SSLMode,
 	}
-	if err := m.dumper.Restore(ctx, params, rc); err != nil {
+
+	if skipped == 0 {
+		// No extensions in the archive: restore it whole, exactly as
+		// before.
+		if err := m.dumper.Restore(ctx, params, rc); err != nil {
+			return fmt.Errorf("failed to restore backup into %s: %w", dbName, err)
+		}
+		return nil
+	}
+
+	if err := m.dumper.RestoreSelected(ctx, params, rc, tocList); err != nil {
 		return fmt.Errorf("failed to restore backup into %s: %w", dbName, err)
+	}
+	return nil
+}
+
+// snapshotTOC reads just the table of contents out of a stored snapshot.
+func (m *Manager) snapshotTOC(ctx context.Context, key string) (string, error) {
+	rc, err := m.objects.Get(ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch backup object: %w", err)
+	}
+	defer rc.Close()
+
+	toc, err := m.dumper.ArchiveTOC(ctx, rc)
+	if err != nil {
+		return "", fmt.Errorf("failed to read the backup archive's contents: %w", err)
+	}
+	return toc, nil
+}
+
+// preCreateExtensions installs every extension the archive names into the
+// new database, as the configured admin, before pg_restore runs as that
+// database's own ordinary role.
+//
+// Why it is needed: pg_dump emits "CREATE EXTENSION IF NOT EXISTS <name>"
+// for every extension in the source database, and the useful ones (postgis,
+// pg_stat_statements, pg_buffercache, ...) are untrusted — only a superuser
+// may create them. Restoring as an ordinary role therefore fails on the
+// first one, and RestoreBackup then drops the entire restored database, so
+// a database created with `db create --extension` could be backed up but
+// never restored. Verified against PostgreSQL 17: pg_restore stops with
+// "permission denied to create extension" and exits 1.
+//
+// Why it does not undo "backup and restore run as the database's own role":
+// the restore itself still connects as that role and can still only write
+// what that role can write. Only this one step uses the admin connection,
+// and it is the step that has always needed it — CreateDatabase installs
+// extensions exactly this way for `db create --extension`
+// (internal/db/postgres.go's EnableExtensions).
+//
+// Why the names are safe to take from the archive: each one is checked with
+// ValidateExtensionName, the same gate the create path applies, and it is
+// then handed to the same admin call `db create --extension` reaches. So
+// restoring a snapshot can install nothing that any project-scoped token
+// could not already install by creating a database — no new capability, and
+// no wider one.
+func (m *Manager) preCreateExtensions(ctx context.Context, dbName, toc string) error {
+	names := backup.ExtensionsInTOC(toc)
+	if len(names) == 0 {
+		return nil
+	}
+	for _, name := range names {
+		if err := ValidateExtensionName(name); err != nil {
+			return fmt.Errorf("backup archive names an unusable extension: %w", err)
+		}
+	}
+	if err := m.pg.EnableExtensions(ctx, dbName, names); err != nil {
+		return fmt.Errorf("failed to install the source database's extensions into %s: %w", dbName, err)
 	}
 	return nil
 }

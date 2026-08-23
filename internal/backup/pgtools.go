@@ -136,6 +136,135 @@ func (d *Dumper) Restore(ctx context.Context, c ConnParams, in io.Reader) error 
 	return d.runner()(ctx, d.restorePath(), args, connEnv(c), in, nil)
 }
 
+// RestoreSelected is Restore limited to the TOC entries listed in tocList,
+// which is a "pg_restore -l" listing with unwanted entries removed (see
+// FilterExtensionEntries). Everything absent from the list is skipped.
+//
+// -L takes a path, so the list is written to a temporary file for the life
+// of the subprocess and removed afterwards. It holds nothing secret — object
+// names and types, no credentials — but it is created 0600 anyway, since
+// os.CreateTemp does that by default and there is no reason to widen it.
+func (d *Dumper) RestoreSelected(ctx context.Context, c ConnParams, in io.Reader, tocList string) error {
+	f, err := os.CreateTemp("", "pgmanager-restore-*.toc")
+	if err != nil {
+		return fmt.Errorf("failed to write the restore list: %w", err)
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := io.WriteString(f, tocList); err != nil {
+		f.Close()
+		return fmt.Errorf("failed to write the restore list: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("failed to write the restore list: %w", err)
+	}
+
+	args := append(connArgs(c), "--no-owner", "--no-privileges", "-L", f.Name())
+	return d.runner()(ctx, d.restorePath(), args, connEnv(c), in, nil)
+}
+
+// ArchiveTOC runs "pg_restore -l" over an archive read from in and returns
+// the listing verbatim.
+//
+// Only the archive header and table of contents are consumed. In a custom
+// (-Fc) archive both sit at the head, so a caller streaming an object out of
+// a bucket pays for the first megabyte or so rather than the whole snapshot.
+// Verified against PostgreSQL 17: "pg_restore -l" over a pipe carrying the
+// first 1 MiB of a 20 MB archive, with the writer then stalling, still
+// printed the complete TOC and exited immediately.
+func (d *Dumper) ArchiveTOC(ctx context.Context, in io.Reader) (string, error) {
+	var out bytes.Buffer
+	if err := d.runner()(ctx, d.restorePath(), []string{"-l"}, nil, in, &out); err != nil {
+		return "", fmt.Errorf("pg_restore -l: %w", err)
+	}
+	return out.String(), nil
+}
+
+// tocEntryFields splits one line of "pg_restore -l" output into its fields,
+// or returns nil for anything that is not a selectable entry (blank lines
+// and the ";"-prefixed header comments).
+//
+// An entry looks like:
+//
+//	2; 3079 16389 EXTENSION - pg_buffercache
+//	3470; 0 0 COMMENT - EXTENSION pg_buffercache
+//	219; 1259 16398 TABLE public t acme_dev_user
+//
+// so the returned fields are [tableoid, oid, type, schema, name...] — the
+// type is always index 2.
+func tocEntryFields(line string) []string {
+	semi := strings.Index(line, ";")
+	if semi <= 0 {
+		return nil
+	}
+	if _, err := strconv.Atoi(strings.TrimSpace(line[:semi])); err != nil {
+		return nil
+	}
+	fields := strings.Fields(line[semi+1:])
+	if len(fields) < 3 {
+		return nil
+	}
+	return fields
+}
+
+// isExtensionOwnerEntry reports whether a TOC entry can only be applied by
+// the extension's owner — which, for every extension a superuser had to
+// install, means only by a superuser. Those are the entries a restore
+// running as the database's own ordinary role has to skip.
+//
+// Two kinds: the CREATE EXTENSION entry itself, and the COMMENT ON EXTENSION
+// entry pg_dump emits beside it. Skipping only the first is not enough —
+// verified against PostgreSQL 17, where pre-creating the extension makes
+// "CREATE EXTENSION IF NOT EXISTS" a harmless no-op but the comment still
+// fails with "must be owner of extension", which is enough to make
+// pg_restore exit non-zero.
+func isExtensionOwnerEntry(fields []string) bool {
+	switch fields[2] {
+	case "EXTENSION":
+		return true
+	case "COMMENT":
+		return len(fields) >= 5 && fields[4] == "EXTENSION"
+	}
+	return false
+}
+
+// ExtensionsInTOC returns, in TOC order, the extensions an archive creates.
+// Callers install these ahead of the restore, as a role allowed to (see
+// internal/project's preCreateExtensions).
+func ExtensionsInTOC(toc string) []string {
+	var names []string
+	for _, line := range strings.Split(toc, "\n") {
+		fields := tocEntryFields(line)
+		if fields == nil || fields[2] != "EXTENSION" || len(fields) < 5 {
+			continue
+		}
+		names = append(names, fields[4])
+	}
+	return names
+}
+
+// FilterExtensionEntries returns a "pg_restore -L" list body holding every
+// TOC entry except the ones only an extension owner could apply, plus the
+// number of entries it dropped. Zero dropped means the archive has no
+// extensions and the caller should restore it unmodified.
+//
+// Lines that are not entries (the header comments) are kept as they are:
+// pg_restore ignores them, and keeping them makes the list readable if it
+// ever ends up in a bug report.
+func FilterExtensionEntries(toc string) (string, int) {
+	lines := strings.Split(toc, "\n")
+	kept := make([]string, 0, len(lines))
+	dropped := 0
+	for _, line := range lines {
+		if fields := tocEntryFields(line); fields != nil && isExtensionOwnerEntry(fields) {
+			dropped++
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n"), dropped
+}
+
 // ClientMajorVersion runs "pg_dump --version" and parses the major version
 // out of output shaped like "pg_dump (PostgreSQL) 17.11".
 func ClientMajorVersion(ctx context.Context, d *Dumper) (int, error) {

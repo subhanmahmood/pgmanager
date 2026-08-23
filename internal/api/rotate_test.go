@@ -69,3 +69,42 @@ func TestRotateRejectsBadEnvSegment(t *testing.T) {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
 	}
 }
+
+// A restored database is addressed at "{env}_restore_{ts}" and is governed by
+// the environment it was restored from, so the token that may read, browse
+// and delete it must be able to rotate its password too. Rotation authorized
+// the raw path segment instead of scopeEnv(segment), which failed closed —
+// a 403 on a database the same token can otherwise use in every other way.
+func TestRotateOnRestoredDatabaseUsesSourceEnvScope(t *testing.T) {
+	fx := setupTestServer(t)
+	defer fx.cleanup()
+
+	const restoredProdRotate = "/api/projects/myapp/databases/prod_restore_20260823T101500/rotate"
+
+	t.Run("prod-scoped token is authorized for a restored prod database", func(t *testing.T) {
+		token := seedScopedToken(t, fx.store, "project:myapp:env:prod")
+
+		req := httptest.NewRequest("POST", restoredProdRotate, nil)
+		w := httptest.NewRecorder()
+		fx.server.Router().ServeHTTP(w, authed(req, token))
+
+		// The database genuinely doesn't exist in this test's store, so the
+		// manager rejects it past the scope check. Anything other than 403
+		// proves the scope check itself passed.
+		if w.Code == http.StatusForbidden {
+			t.Fatalf("status = %d, want != %d — a prod-scoped token must be able to rotate a restored prod database (body %s)", w.Code, http.StatusForbidden, w.Body.String())
+		}
+	})
+
+	t.Run("dev-scoped token is still denied a restored prod database", func(t *testing.T) {
+		token := seedScopedToken(t, fx.store, "project:myapp:env:dev")
+
+		req := httptest.NewRequest("POST", restoredProdRotate, nil)
+		w := httptest.NewRecorder()
+		fx.server.Router().ServeHTTP(w, authed(req, token))
+
+		if w.Code != http.StatusForbidden {
+			t.Errorf("status = %d, want %d (body %s) — a dev-scoped token must not rotate a restored prod database", w.Code, http.StatusForbidden, w.Body.String())
+		}
+	})
+}

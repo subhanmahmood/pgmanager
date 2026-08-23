@@ -182,6 +182,13 @@ pgmanager db credentials myapp "$(jq -r .env restored.json)"
 pgmanager db delete myapp "$(jq -r .env restored.json)"     # when you're done with it
 ```
 
+Extensions come across with the data: the Server installs whatever the snapshot's archive names
+(`postgis`, `pg_trgm`, ...) into the new database before restoring into it, because Postgres lets
+only a superuser create most extensions while the restore itself runs as the new database's own
+role. A restored database is not itself backed up — the backup routes reject its
+`{env}_restore_{timestamp}` address, and the admin UI hides the Backups card for it. Back up the
+source database instead.
+
 Restored databases never expire and are never PR databases, so `pgmanager cleanup` never touches
 them — delete them explicitly when you're done. `db list` shows a restored row's `env` as that same
 addressable segment, and a `restored_from` field naming the backup it came from.

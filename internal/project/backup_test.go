@@ -3,10 +3,13 @@ package project
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -455,5 +458,133 @@ func TestDeleteDatabaseKeepsBackupObjectsWhenTheDropFails(t *testing.T) {
 	}
 	if len(remaining) != 1 {
 		t.Errorf("backup rows = %d, want 1", len(remaining))
+	}
+}
+
+// stallingStore is an ObjectStore whose Put never returns on its own for one
+// database's keys: it waits for the context it was handed, exactly like an
+// upload to an endpoint that accepts the connection and then goes quiet, or
+// a pg_dump blocked forever behind a conflicting lock. Every other key is
+// handled by the embedded MemoryStore.
+type stallingStore struct {
+	*backup.MemoryStore
+	stallKeySubstring string
+}
+
+func (s *stallingStore) Put(ctx context.Context, key string, body io.Reader) (int64, error) {
+	if strings.Contains(key, s.stallKeySubstring) {
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	return s.MemoryStore.Put(ctx, key, body)
+}
+
+// writeTinyDumpScript is a stand-in pg_dump that writes a few bytes and
+// exits, so a scheduled backup can succeed without a Postgres server.
+func writeTinyDumpScript(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fake-pg_dump.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf 'dump-bytes'\n"), 0o755); err != nil {
+		t.Fatalf("write fake pg_dump script: %v", err)
+	}
+	return path
+}
+
+// TestRunDueBackupsBoundsEachDatabase: the scheduler hands RunDueBackups a
+// background context that nothing cancels, and the sweep is serial, so a
+// backup that never returns used to strand every database behind it —
+// scheduled protection silently stopped for the whole server. Each backup
+// now runs under its own deadline, so the stuck one fails and the sweep
+// carries on.
+func TestRunDueBackupsBoundsEachDatabase(t *testing.T) {
+	mgr, store, objects, stuckDBID := newBackupTestManager(t, 3)
+	ctx := context.Background()
+
+	proj, err := store.GetProject(ctx, "acme")
+	if err != nil || proj == nil {
+		t.Fatalf("get project: %v", err)
+	}
+	healthy, err := store.CreateDatabase(ctx, proj.ID, "acme_staging", "acme_staging_user", "pw", "staging", nil, nil)
+	if err != nil {
+		t.Fatalf("create second database: %v", err)
+	}
+	for _, name := range []string{"acme_dev", "acme_staging"} {
+		if err := store.SetBackupsEnabled(ctx, name, true); err != nil {
+			t.Fatalf("enable backups on %s: %v", name, err)
+		}
+	}
+
+	dumper := backup.NewDumper()
+	dumper.DumpPath = writeTinyDumpScript(t)
+	mgr.EnableBackups(&stallingStore{MemoryStore: objects, stallKeySubstring: "acme_dev"}, dumper)
+
+	restore := scheduledBackupTimeout
+	scheduledBackupTimeout = 250 * time.Millisecond
+	defer func() { scheduledBackupTimeout = restore }()
+
+	type result struct {
+		ran int
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		ran, err := mgr.RunDueBackups(ctx)
+		done <- result{ran, err}
+	}()
+
+	var got result
+	select {
+	case got = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("RunDueBackups never returned — one stalled database stalled the whole sweep")
+	}
+	if got.err != nil {
+		t.Fatalf("RunDueBackups error = %v, want nil (one database failing is logged, not returned)", got.err)
+	}
+	if got.ran != 1 {
+		t.Errorf("ran = %d, want 1 (the healthy database)", got.ran)
+	}
+
+	stuck, err := store.ListBackups(ctx, stuckDBID)
+	if err != nil {
+		t.Fatalf("list stuck backups: %v", err)
+	}
+	if len(stuck) != 1 || stuck[0].Status != meta.BackupStatusFailed {
+		t.Errorf("stalled database backups = %+v, want exactly one failed row", stuck)
+	}
+
+	ok, err := store.ListBackups(ctx, healthy.ID)
+	if err != nil {
+		t.Fatalf("list healthy backups: %v", err)
+	}
+	if len(ok) != 1 || ok[0].Status != meta.BackupStatusSucceeded {
+		t.Fatalf("healthy database backups = %+v, want exactly one succeeded row — it must not be held hostage by the stalled one", ok)
+	}
+	if !objects.Has(ok[0].Key) {
+		t.Errorf("object %s missing from the store", ok[0].Key)
+	}
+}
+
+// A cancelled sweep stops between databases instead of starting work it
+// cannot finish — that is what lets `serve` shut down without waiting out a
+// backup's full deadline.
+func TestRunDueBackupsStopsWhenCancelled(t *testing.T) {
+	mgr, store, _, _ := newBackupTestManager(t, 3)
+	ctx := context.Background()
+
+	if err := store.SetBackupsEnabled(ctx, "acme_dev", true); err != nil {
+		t.Fatalf("enable backups: %v", err)
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	ran, err := mgr.RunDueBackups(cancelled)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+	if ran != 0 {
+		t.Errorf("ran = %d, want 0", ran)
 	}
 }

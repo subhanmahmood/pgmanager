@@ -66,6 +66,22 @@ func (m *Manager) checkBackupsEnabled() error {
 // goroutine indefinitely.
 const cleanupTimeout = 30 * time.Second
 
+// scheduledBackupTimeout bounds one scheduled backup, mirroring the 60m
+// budget requestTimeoutMiddleware gives the manual POST .../backups route:
+// it is the same work, one pg_dump streamed straight into one upload.
+//
+// The scheduler runs on a background context that nothing else ever
+// cancels, and RunDueBackups walks its databases serially. Without a bound
+// here, a single dump blocked forever — waiting on a conflicting lock, or an
+// upload to an endpoint that accepts the connection and then never
+// answers — would stall the whole sweep: every later database silently
+// stops being backed up, and the scheduler goroutine never returns to its
+// stop channel. One wedged database must not be able to disable scheduled
+// backups for all the others.
+//
+// A var, not a const, only so tests can shorten it.
+var scheduledBackupTimeout = 60 * time.Minute
+
 // cleanupContext returns a context for compensating work — dropping a
 // half-restored database, deleting a partial object, recording a backup's
 // outcome — that must still run when the operation it is undoing failed.
@@ -464,6 +480,13 @@ func (m *Manager) RunDueBackups(ctx context.Context) (int, error) {
 
 	var ran int
 	for i := range dbs {
+		// Stop between databases when the sweep itself is cancelled (the
+		// server is shutting down) rather than starting work that cannot
+		// finish.
+		if err := ctx.Err(); err != nil {
+			return ran, err
+		}
+
 		dbRecord := dbs[i]
 
 		due, err := m.backupDue(ctx, dbRecord.ID)
@@ -481,7 +504,16 @@ func (m *Manager) RunDueBackups(ctx context.Context) (int, error) {
 			continue
 		}
 
-		if _, err := m.runBackup(ctx, projectName, &dbRecord); err != nil {
+		// Each backup gets its own deadline, so one that never returns
+		// costs this sweep an hour rather than costing every later
+		// database its backup forever.
+		err = func() error {
+			runCtx, cancel := context.WithTimeout(ctx, scheduledBackupTimeout)
+			defer cancel()
+			_, err := m.runBackup(runCtx, projectName, &dbRecord)
+			return err
+		}()
+		if err != nil {
 			log.Printf("ERROR [RunDueBackups %s]: %v", dbRecord.Name, err)
 			continue
 		}

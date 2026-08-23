@@ -9,6 +9,7 @@ import {
   parseEnvSegment,
   primaryKeyColumns,
   relativeExpiry,
+  supportsBackups,
   truncate,
 } from './format'
 
@@ -139,5 +140,29 @@ describe('truncate', () => {
   it('leaves short strings alone and ellipsises long ones', () => {
     expect(truncate('short', 10)).toBe('short')
     expect(truncate('abcdefghijk', 5)).toBe('abcd…')
+  })
+})
+
+describe('supportsBackups', () => {
+  it('allows the three backup-able environments', () => {
+    for (const env of ['dev', 'staging', 'prod']) {
+      expect(supportsBackups({ env })).toBe(true)
+    }
+  })
+
+  it('refuses pr databases, which every backup route rejects', () => {
+    expect(supportsBackups({ env: 'pr' })).toBe(false)
+  })
+
+  // A restored database is addressed as "dev_restore_<ts>". backupTarget
+  // validates that segment with ValidateEnv and rejects it, and the
+  // scheduler skips restored rows, so the card would show enabled controls
+  // whose requests fail over a history that can never fill.
+  it('refuses restored databases', () => {
+    expect(supportsBackups({ env: 'dev_restore_20260823T101500', restored_from: 7 })).toBe(false)
+    // restored_from alone is enough, even if the env segment ever changes.
+    expect(supportsBackups({ env: 'dev', restored_from: 7 })).toBe(false)
+    // ...and an absent restored_from must not be read as "restored".
+    expect(supportsBackups({ env: 'dev', restored_from: undefined })).toBe(true)
   })
 })

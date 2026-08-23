@@ -8,7 +8,14 @@ import {
   useDeleteDatabase,
   useTables,
 } from '@/hooks/queries'
-import { envSegment, expiringSoon, fmtDate, isExpired, relativeExpiry } from '@/lib/format'
+import {
+  envSegment,
+  expiringSoon,
+  fmtDate,
+  isExpired,
+  relativeExpiry,
+  supportsBackups,
+} from '@/lib/format'
 import { PageHeader } from '@/components/page-header'
 import { EmptyState, ErrorState } from '@/components/states'
 import { EnvBadge } from '@/components/env-badge'
@@ -271,9 +278,11 @@ export function DatabaseDetailPage() {
             </CardContent>
           </Card>
 
-          {/* Backups don't exist for pr databases — they're throwaway by
-              design, and the server rejects every backup route for env=pr. */}
-          {db.env !== 'pr' && <BackupsCard db={db} />}
+          {/* Only where the server would actually accept a backup: not for
+              pr databases (throwaway by design, and every backup route
+              rejects env=pr), and not for a restored one, whose address
+              segment those routes reject as well. */}
+          {supportsBackups(db) && <BackupsCard db={db} />}
         </div>
 
         <div className="lg:col-span-1">

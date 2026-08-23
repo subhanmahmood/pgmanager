@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -250,5 +252,179 @@ func TestZeroValueDumperDefaultsPaths(t *testing.T) {
 	}
 	if got := d.restorePath(); got != "pg_restore" {
 		t.Errorf("restorePath() = %q, want pg_restore", got)
+	}
+}
+
+// realTOC is verbatim "pg_restore -l" output from PostgreSQL 17 for a custom
+// archive of a database holding two extensions (one of them untrusted), two
+// tables and their constraints. Captured from a real pg_dump rather than
+// written by hand, because the entry layout is what these functions parse.
+const realTOC = `;
+; Archive created at 2026-08-23 18:42:46 UTC
+;     dbname: src
+;     TOC Entries: 14
+;     Compression: gzip
+;     Dump Version: 1.16-0
+;     Format: CUSTOM
+;     Integer: 4 bytes
+;     Offset: 8 bytes
+;     Dumped from database version: 17.10
+;     Dumped by pg_dump version: 17.10
+;
+;
+; Selected TOC Entries:
+;
+3; 3079 16547 EXTENSION - hstore 
+3573; 0 0 COMMENT - EXTENSION hstore 
+2; 3079 16389 EXTENSION - pg_buffercache 
+3574; 0 0 COMMENT - EXTENSION pg_buffercache 
+221; 1259 16675 TABLE public h srcuser
+220; 1259 16398 TABLE public t srcuser
+3566; 0 16675 TABLE DATA public h srcuser
+3565; 0 16398 TABLE DATA public t srcuser
+3418; 2606 16681 CONSTRAINT public h h_pkey srcuser
+3416; 2606 16404 CONSTRAINT public t t_pkey srcuser
+`
+
+func TestExtensionsInTOC(t *testing.T) {
+	got := ExtensionsInTOC(realTOC)
+	want := []string{"hstore", "pg_buffercache"}
+	if len(got) != len(want) {
+		t.Fatalf("ExtensionsInTOC() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ExtensionsInTOC() = %v, want %v", got, want)
+		}
+	}
+
+	// An archive without extensions must produce no names at all, so the
+	// restore path stays exactly as it was.
+	plain := ";\n; Selected TOC Entries:\n;\n219; 1259 16398 TABLE public t acme_dev_user\n"
+	if got := ExtensionsInTOC(plain); len(got) != 0 {
+		t.Errorf("ExtensionsInTOC(no extensions) = %v, want none", got)
+	}
+}
+
+func TestFilterExtensionEntriesDropsOnlyOwnerOnlyEntries(t *testing.T) {
+	filtered, dropped := FilterExtensionEntries(realTOC)
+
+	if dropped != 4 {
+		t.Errorf("dropped = %d, want 4 (two EXTENSION entries and their two COMMENTs)", dropped)
+	}
+	for _, gone := range []string{"EXTENSION - hstore", "EXTENSION - pg_buffercache", "COMMENT - EXTENSION"} {
+		if strings.Contains(filtered, gone) {
+			t.Errorf("filtered list still contains %q:\n%s", gone, filtered)
+		}
+	}
+	// Everything a restore actually needs has to survive, untouched. A
+	// filter that dropped a TABLE DATA entry would silently restore an
+	// empty database.
+	for _, keep := range []string{
+		"221; 1259 16675 TABLE public h srcuser",
+		"220; 1259 16398 TABLE public t srcuser",
+		"3566; 0 16675 TABLE DATA public h srcuser",
+		"3565; 0 16398 TABLE DATA public t srcuser",
+		"3418; 2606 16681 CONSTRAINT public h h_pkey srcuser",
+		"3416; 2606 16404 CONSTRAINT public t t_pkey srcuser",
+	} {
+		if !strings.Contains(filtered, keep) {
+			t.Errorf("filtered list lost %q:\n%s", keep, filtered)
+		}
+	}
+}
+
+func TestFilterExtensionEntriesLeavesExtensionFreeArchivesAlone(t *testing.T) {
+	plain := ";\n; Selected TOC Entries:\n;\n219; 1259 16398 TABLE public t acme_dev_user\n3463; 0 16398 TABLE DATA public t acme_dev_user\n"
+	filtered, dropped := FilterExtensionEntries(plain)
+	if dropped != 0 {
+		t.Errorf("dropped = %d, want 0", dropped)
+	}
+	if filtered != plain {
+		t.Errorf("filtered = %q, want the input unchanged", filtered)
+	}
+}
+
+func TestArchiveTOCRunsPgRestoreList(t *testing.T) {
+	var gotStdin string
+	d := &Dumper{run: func(ctx context.Context, name string, args, env []string, stdin io.Reader, stdout io.Writer) error {
+		if name != "pg_restore" {
+			t.Errorf("name = %q, want pg_restore", name)
+		}
+		if len(args) != 1 || args[0] != "-l" {
+			t.Errorf("args = %v, want [-l]", args)
+		}
+		b, err := io.ReadAll(stdin)
+		if err != nil {
+			return err
+		}
+		gotStdin = string(b)
+		_, err = io.WriteString(stdout, realTOC)
+		return err
+	}}
+
+	toc, err := d.ArchiveTOC(context.Background(), strings.NewReader("archive-bytes"))
+	if err != nil {
+		t.Fatalf("ArchiveTOC: %v", err)
+	}
+	if gotStdin != "archive-bytes" {
+		t.Errorf("stdin = %q, want the archive", gotStdin)
+	}
+	if toc != realTOC {
+		t.Errorf("ArchiveTOC returned %q", toc)
+	}
+}
+
+// RestoreSelected has to hand pg_restore a real file, since -L takes a path,
+// and it must still keep the password out of argv.
+func TestRestoreSelectedWritesListFileAndKeepsPasswordOutOfArgv(t *testing.T) {
+	list, _ := FilterExtensionEntries(realTOC)
+
+	var listPath, listBody string
+	var gotArgs, gotEnv []string
+	d := &Dumper{run: func(ctx context.Context, name string, args, env []string, stdin io.Reader, stdout io.Writer) error {
+		gotArgs, gotEnv = args, env
+		for i, a := range args {
+			if a == "-L" && i+1 < len(args) {
+				listPath = args[i+1]
+				b, err := os.ReadFile(listPath)
+				if err != nil {
+					return err
+				}
+				listBody = string(b)
+			}
+		}
+		return nil
+	}}
+
+	err := d.RestoreSelected(context.Background(), ConnParams{
+		Host: "db.internal", Port: 5432, DBName: "acme_dev_restore_20260823T101500",
+		User: "acme_dev_restore_20260823T101500_user", Password: "s3cret",
+	}, strings.NewReader("archive-bytes"), list)
+	if err != nil {
+		t.Fatalf("RestoreSelected: %v", err)
+	}
+
+	if listPath == "" {
+		t.Fatalf("args = %v, want a -L <path> pair", gotArgs)
+	}
+	if listBody != list {
+		t.Errorf("list file body = %q, want the filtered list", listBody)
+	}
+	if _, err := os.Stat(listPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("temporary list file %s survived the call (stat err = %v)", listPath, err)
+	}
+	for _, a := range gotArgs {
+		if strings.Contains(a, "s3cret") {
+			t.Fatalf("password leaked into argv: %v", gotArgs)
+		}
+	}
+	if !slices.Contains(gotEnv, "PGPASSWORD=s3cret") {
+		t.Errorf("env is missing PGPASSWORD")
+	}
+	for _, want := range []string{"--no-owner", "--no-privileges"} {
+		if !slices.Contains(gotArgs, want) {
+			t.Errorf("args = %v, want %s", gotArgs, want)
+		}
 	}
 }
