@@ -3,11 +3,13 @@ import {
   cellText,
   envSegment,
   expiringSoon,
+  fmtBytes,
   inputValue,
   isExpired,
   parseEnvSegment,
   primaryKeyColumns,
   relativeExpiry,
+  supportsBackups,
   truncate,
 } from './format'
 
@@ -118,9 +120,49 @@ describe('primaryKeyColumns', () => {
   })
 })
 
+describe('fmtBytes', () => {
+  // Mirrors cmd/pgmanager's humanBytes — same base unit, same rounding — so
+  // a size shown in the CLI and the admin UI never disagree.
+  it('keeps sub-KiB sizes as whole bytes', () => {
+    expect(fmtBytes(0)).toBe('0 B')
+    expect(fmtBytes(1023)).toBe('1023 B')
+  })
+
+  it('renders larger sizes with one decimal and the right unit', () => {
+    expect(fmtBytes(1024)).toBe('1.0 KiB')
+    expect(fmtBytes(1536)).toBe('1.5 KiB')
+    expect(fmtBytes(5 * 1024 * 1024)).toBe('5.0 MiB')
+    expect(fmtBytes(2 * 1024 * 1024 * 1024)).toBe('2.0 GiB')
+  })
+})
+
 describe('truncate', () => {
   it('leaves short strings alone and ellipsises long ones', () => {
     expect(truncate('short', 10)).toBe('short')
     expect(truncate('abcdefghijk', 5)).toBe('abcd…')
+  })
+})
+
+describe('supportsBackups', () => {
+  it('allows the three backup-able environments', () => {
+    for (const env of ['dev', 'staging', 'prod']) {
+      expect(supportsBackups({ env })).toBe(true)
+    }
+  })
+
+  it('refuses pr databases, which every backup route rejects', () => {
+    expect(supportsBackups({ env: 'pr' })).toBe(false)
+  })
+
+  // A restored database is addressed as "dev_restore_<ts>". backupTarget
+  // validates that segment with ValidateEnv and rejects it, and the
+  // scheduler skips restored rows, so the card would show enabled controls
+  // whose requests fail over a history that can never fill.
+  it('refuses restored databases', () => {
+    expect(supportsBackups({ env: 'dev_restore_20260823T101500', restored_from: 7 })).toBe(false)
+    // restored_from alone is enough, even if the env segment ever changes.
+    expect(supportsBackups({ env: 'dev', restored_from: 7 })).toBe(false)
+    // ...and an absent restored_from must not be read as "restored".
+    expect(supportsBackups({ env: 'dev', restored_from: undefined })).toBe(true)
   })
 })

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"pgmanager/internal/backup"
 	"pgmanager/internal/config"
 	"pgmanager/internal/db"
 	"pgmanager/internal/meta"
@@ -44,6 +45,17 @@ type Manager struct {
 	cfg   *config.Config
 	pg    *db.PostgresClient
 	store meta.Store
+
+	// Backup wiring. Nil objects/dumper means backups are unavailable —
+	// every backup.go method must check that before touching either. See
+	// EnableBackups / DisableBackups.
+	objects   backup.ObjectStore
+	dumper    *backup.Dumper
+	backupCfg config.BackupConfig
+	// backupErr records why backups are disabled, so a caller asking for a
+	// backup gets a reason instead of a bare "disabled". Nil when backups
+	// were simply never enabled (e.g. backup.enabled: false).
+	backupErr error
 }
 
 // DatabaseInfo contains information about a database
@@ -59,6 +71,14 @@ type DatabaseInfo struct {
 	ConnString   string
 	CreatedAt    time.Time
 	ExpiresAt    *time.Time
+	// BackupsEnabled mirrors the stored scheduled-backup flag. It is read
+	// straight off the metadata record so a caller (the CLI, the admin UI's
+	// toggle) can see the state it just set, and see it again after a
+	// restart.
+	BackupsEnabled bool
+	// RestoredFrom holds the source backup's ID when this database was
+	// created by a restore, and is nil otherwise.
+	RestoredFrom *int64
 }
 
 // NewManager creates a new project manager
@@ -154,6 +174,11 @@ func (m *Manager) ListProjects(ctx context.Context) ([]meta.Project, error) {
 
 // DeleteProject deletes a project and all its databases
 func (m *Manager) DeleteProject(ctx context.Context, name string) error {
+	// Capture the stored backup keys first: store.DeleteProject cascades the
+	// project's databases away, and pgmanager.backups cascades with them, so
+	// after that call there is nothing left that names the S3 objects.
+	backupKeys := m.projectBackupObjectKeys(ctx, name)
+
 	// Get all databases for this project
 	databases, err := m.store.DeleteProject(ctx, name)
 	if err != nil {
@@ -166,6 +191,12 @@ func (m *Manager) DeleteProject(ctx context.Context, name string) error {
 			// Log but continue with other databases
 			fmt.Printf("Warning: failed to drop database %s: %v\n", db.Name, err)
 		}
+	}
+
+	// Stored snapshots last, so a bucket problem can't stop the deletion the
+	// caller asked for; failures are logged with the orphaned key.
+	for dbName, keys := range backupKeys {
+		m.deleteBackupObjects(ctx, dbName, keys)
 	}
 
 	return nil
@@ -256,48 +287,68 @@ func (m *Manager) CreateDatabase(ctx context.Context, projectName, env string, p
 	}, nil
 }
 
-// GetDatabase returns information about a database
-func (m *Manager) GetDatabase(ctx context.Context, projectName, env string, prNumber *int) (*DatabaseInfo, error) {
-	if err := ValidateEnv(env); err != nil {
-		return nil, err
-	}
-
-	// Get project
+// resolveDatabase finds the database a path segment names. It tries the
+// database name first, which is how a restored database is addressed, and
+// falls back to the (project, env, pr) lookup. GetDatabase filters out
+// restored rows, so the two paths can never disagree: for a non-restored
+// database the name probe finds the exact same row the fallback would.
+func (m *Manager) resolveDatabase(ctx context.Context, projectName, segment string, prNumber *int) (*meta.Project, *meta.Database, error) {
 	project, err := m.store.GetProject(ctx, projectName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get project: %w", err)
+		return nil, nil, fmt.Errorf("failed to get project: %w", err)
 	}
 	if project == nil {
-		return nil, fmt.Errorf("project '%s' not found", projectName)
+		return nil, nil, fmt.Errorf("project '%s' not found", projectName)
 	}
 
-	// Get database
-	dbRecord, err := m.store.GetDatabase(ctx, project.ID, env, prNumber)
+	if rec, err := m.store.GetDatabaseByName(ctx, projectName+"_"+segment); err != nil {
+		return nil, nil, fmt.Errorf("failed to get database: %w", err)
+	} else if rec != nil && rec.ProjectID == project.ID {
+		return project, rec, nil
+	}
+
+	if err := ValidateEnv(segment); err != nil {
+		return nil, nil, err
+	}
+
+	dbRecord, err := m.store.GetDatabase(ctx, project.ID, segment, prNumber)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get database: %w", err)
+		return nil, nil, fmt.Errorf("failed to get database: %w", err)
 	}
 	if dbRecord == nil {
-		envStr := env
+		envStr := segment
 		if prNumber != nil {
 			envStr = fmt.Sprintf("pr_%d", *prNumber)
 		}
-		return nil, fmt.Errorf("database not found for %s/%s", projectName, envStr)
+		return nil, nil, fmt.Errorf("database not found for %s/%s", projectName, envStr)
+	}
+
+	return project, dbRecord, nil
+}
+
+// GetDatabase returns information about a database
+func (m *Manager) GetDatabase(ctx context.Context, projectName, env string, prNumber *int) (*DatabaseInfo, error) {
+	_, dbRecord, err := m.resolveDatabase(ctx, projectName, env, prNumber)
+	if err != nil {
+		return nil, err
 	}
 
 	host := m.cfg.Postgres.EffectiveHost()
 	port := m.cfg.Postgres.EffectivePort()
 	return &DatabaseInfo{
-		Project:      projectName,
-		Env:          env,
-		PRNumber:     dbRecord.PRNumber,
-		DatabaseName: dbRecord.Name,
-		UserName:     dbRecord.UserName,
-		Password:     dbRecord.Password,
-		Host:         host,
-		Port:         port,
-		ConnString:   db.ConnectionString(host, port, dbRecord.Name, dbRecord.UserName, dbRecord.Password, m.cfg.Postgres.SSLMode),
-		CreatedAt:    dbRecord.CreatedAt,
-		ExpiresAt:    dbRecord.ExpiresAt,
+		Project:        projectName,
+		Env:            env,
+		PRNumber:       dbRecord.PRNumber,
+		DatabaseName:   dbRecord.Name,
+		UserName:       dbRecord.UserName,
+		Password:       dbRecord.Password,
+		Host:           host,
+		Port:           port,
+		ConnString:     db.ConnectionString(host, port, dbRecord.Name, dbRecord.UserName, dbRecord.Password, m.cfg.Postgres.SSLMode),
+		CreatedAt:      dbRecord.CreatedAt,
+		ExpiresAt:      dbRecord.ExpiresAt,
+		BackupsEnabled: dbRecord.BackupsEnabled,
+		RestoredFrom:   dbRecord.RestoredFrom,
 	}, nil
 }
 
@@ -340,18 +391,32 @@ func (m *Manager) ListDatabases(ctx context.Context, projectName string) ([]Data
 			projectNameStr = projectCache[dbItem.ProjectID]
 		}
 
+		// A restored database's metadata row stores the *source* env
+		// ("dev"), not the addressable path segment — the row is reached at
+		// "{source.Env}_restore_{ts}" (see RestoreBackup), which is exactly
+		// the database name with the "{project}_" prefix stripped. Compute
+		// that here so Env always matches what GetDatabase expects as its
+		// segment argument, the same convention every other DatabaseInfo
+		// already follows.
+		env := dbItem.Env
+		if dbItem.RestoredFrom != nil {
+			env = strings.TrimPrefix(dbItem.Name, projectNameStr+"_")
+		}
+
 		result = append(result, DatabaseInfo{
-			Project:      projectNameStr,
-			Env:          dbItem.Env,
-			PRNumber:     dbItem.PRNumber,
-			DatabaseName: dbItem.Name,
-			UserName:     dbItem.UserName,
-			Password:     dbItem.Password,
-			Host:         host,
-			Port:         port,
-			ConnString:   db.ConnectionString(host, port, dbItem.Name, dbItem.UserName, dbItem.Password, m.cfg.Postgres.SSLMode),
-			CreatedAt:    dbItem.CreatedAt,
-			ExpiresAt:    dbItem.ExpiresAt,
+			Project:        projectNameStr,
+			Env:            env,
+			PRNumber:       dbItem.PRNumber,
+			DatabaseName:   dbItem.Name,
+			UserName:       dbItem.UserName,
+			Password:       dbItem.Password,
+			Host:           host,
+			Port:           port,
+			ConnString:     db.ConnectionString(host, port, dbItem.Name, dbItem.UserName, dbItem.Password, m.cfg.Postgres.SSLMode),
+			CreatedAt:      dbItem.CreatedAt,
+			ExpiresAt:      dbItem.ExpiresAt,
+			BackupsEnabled: dbItem.BackupsEnabled,
+			RestoredFrom:   dbItem.RestoredFrom,
 		})
 	}
 
@@ -363,28 +428,9 @@ func (m *Manager) ListDatabases(ctx context.Context, projectName string) ([]Data
 // password. If terminate is true, existing backends on the database are killed
 // so clients still holding the old credential are forced to reconnect.
 func (m *Manager) RotatePassword(ctx context.Context, projectName, env string, prNumber *int, terminate bool) (*DatabaseInfo, error) {
-	if err := ValidateEnv(env); err != nil {
+	_, dbRecord, err := m.resolveDatabase(ctx, projectName, env, prNumber)
+	if err != nil {
 		return nil, err
-	}
-
-	project, err := m.store.GetProject(ctx, projectName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get project: %w", err)
-	}
-	if project == nil {
-		return nil, fmt.Errorf("project '%s' not found", projectName)
-	}
-
-	dbRecord, err := m.store.GetDatabase(ctx, project.ID, env, prNumber)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get database: %w", err)
-	}
-	if dbRecord == nil {
-		envStr := env
-		if prNumber != nil {
-			envStr = fmt.Sprintf("pr_%d", *prNumber)
-		}
-		return nil, fmt.Errorf("database not found for %s/%s", projectName, envStr)
 	}
 
 	password := db.GeneratePassword()
@@ -409,43 +455,33 @@ func (m *Manager) RotatePassword(ctx context.Context, projectName, env string, p
 	host := m.cfg.Postgres.EffectiveHost()
 	port := m.cfg.Postgres.EffectivePort()
 	return &DatabaseInfo{
-		Project:      projectName,
-		Env:          env,
-		PRNumber:     dbRecord.PRNumber,
-		DatabaseName: dbRecord.Name,
-		UserName:     dbRecord.UserName,
-		Password:     password,
-		Host:         host,
-		Port:         port,
-		ConnString:   db.ConnectionString(host, port, dbRecord.Name, dbRecord.UserName, password, m.cfg.Postgres.SSLMode),
-		CreatedAt:    dbRecord.CreatedAt,
-		ExpiresAt:    dbRecord.ExpiresAt,
+		Project:        projectName,
+		Env:            env,
+		PRNumber:       dbRecord.PRNumber,
+		DatabaseName:   dbRecord.Name,
+		UserName:       dbRecord.UserName,
+		Password:       password,
+		Host:           host,
+		Port:           port,
+		ConnString:     db.ConnectionString(host, port, dbRecord.Name, dbRecord.UserName, password, m.cfg.Postgres.SSLMode),
+		CreatedAt:      dbRecord.CreatedAt,
+		ExpiresAt:      dbRecord.ExpiresAt,
+		BackupsEnabled: dbRecord.BackupsEnabled,
+		RestoredFrom:   dbRecord.RestoredFrom,
 	}, nil
 }
 
 // DeleteDatabase deletes a database
 func (m *Manager) DeleteDatabase(ctx context.Context, projectName, env string, prNumber *int) error {
-	if err := ValidateEnv(env); err != nil {
+	_, dbRecord, err := m.resolveDatabase(ctx, projectName, env, prNumber)
+	if err != nil {
 		return err
 	}
 
-	// Get project
-	project, err := m.store.GetProject(ctx, projectName)
-	if err != nil {
-		return fmt.Errorf("failed to get project: %w", err)
-	}
-	if project == nil {
-		return fmt.Errorf("project '%s' not found", projectName)
-	}
-
-	// Get database
-	dbRecord, err := m.store.GetDatabase(ctx, project.ID, env, prNumber)
-	if err != nil {
-		return fmt.Errorf("failed to get database: %w", err)
-	}
-	if dbRecord == nil {
-		return fmt.Errorf("database not found")
-	}
+	// Capture the stored backup keys first: the metadata delete below
+	// cascades this database's backup rows away, taking every object_key
+	// with them.
+	backupKeys := m.backupObjectKeys(ctx, dbRecord.ID)
 
 	// Drop from PostgreSQL
 	if err := m.pg.DropDatabase(ctx, dbRecord.Name, dbRecord.UserName); err != nil {
@@ -456,6 +492,11 @@ func (m *Manager) DeleteDatabase(ctx context.Context, projectName, env string, p
 	if err := m.store.DeleteDatabase(ctx, dbRecord.Name); err != nil {
 		return fmt.Errorf("failed to delete database metadata: %w", err)
 	}
+
+	// Stored snapshots last. If either step above had failed we would still
+	// have both the database and its backups, which is the safe direction to
+	// fail in.
+	m.deleteBackupObjects(ctx, dbRecord.Name, backupKeys)
 
 	return nil
 }

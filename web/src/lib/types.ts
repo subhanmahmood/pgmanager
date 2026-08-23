@@ -48,6 +48,12 @@ export interface DatabaseInfo {
   port: number
   created_at: string
   expires_at?: string
+  /** Whether the server's scheduler backs this database up. Always sent by
+   *  the API (never omitted), so the toggle can render the stored state
+   *  rather than assuming off. */
+  backups_enabled: boolean
+  /** Set only on a database created by a restore: the source backup's ID. */
+  restored_from?: number
 }
 
 /** internal/api/handlers.go — DatabaseResponse. Returned only by create,
@@ -138,6 +144,21 @@ export interface RowPage {
 export interface RowMutation {
   key?: Row
   values?: Row
+}
+
+/** internal/api/backup_handlers.go — BackupResponse. Never carries a
+ *  credential — the S3 bucket configuration and its secret stay server-side. */
+export interface Backup {
+  id: number
+  database_name: string
+  object_key: string
+  size_bytes: number
+  status: 'running' | 'succeeded' | 'failed'
+  /** Only present when status === 'failed'. */
+  error?: string
+  started_at: string
+  /** Absent while status === 'running'. */
+  finished_at?: string
 }
 
 /** internal/api/handlers.go — CleanupResponse */

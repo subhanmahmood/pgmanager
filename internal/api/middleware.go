@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -262,5 +264,81 @@ func auditLogMiddleware(next http.Handler) http.Handler {
 		}
 		log.Printf("audit method=%s path=%s status=%d duration=%s ip=%s token=%s scopes=%s",
 			r.Method, r.URL.Path, rec.status, dur, getClientIP(r), prefix, scopes)
+	})
+}
+
+// Request deadlines.
+//
+// Almost every route here is a metadata lookup or a short DDL statement, and
+// a minute is already generous for those. Two routes are not: POST
+// .../backups runs pg_dump and streams its output into the bucket, and POST
+// .../backups/{id}/restore streams an object back through pg_restore. Both
+// wait synchronously for a whole database to move, which on a real database
+// takes far longer than a minute, so applying the ordinary deadline to them
+// meant `pgmanager db backup` and the admin UI's Back up / Restore buttons
+// could not succeed at all beyond a trivial dataset.
+//
+// The remedy stays deliberately small: a longer deadline on exactly those
+// two routes, matched by a longer client-side deadline in
+// internal/client/http.go. Turning backup and restore into asynchronous jobs
+// would be a different feature with a different CLI and UI contract.
+const (
+	defaultRequestTimeout = 60 * time.Second
+	backupRequestTimeout  = 60 * time.Minute
+)
+
+// isLongRunningRequest reports whether a request is one of the two that wait
+// on pg_dump/pg_restore.
+//
+// It matches the raw path rather than a chi route pattern because this
+// middleware runs before the router has matched anything — chi's
+// RouteContext is still empty at that point. The shapes matched are
+// POST /api/projects/{name}/databases/{env}/backups and
+// POST /api/projects/{name}/databases/{env}/backups/{id}/restore; nothing
+// else in the route table ends in /backups or /restore.
+func isLongRunningRequest(method, path string) bool {
+	if method != http.MethodPost {
+		return false
+	}
+	if !strings.HasPrefix(path, "/api/projects/") || !strings.Contains(path, "/databases/") {
+		return false
+	}
+	path = strings.TrimSuffix(path, "/")
+	return strings.HasSuffix(path, "/backups") || strings.HasSuffix(path, "/restore")
+}
+
+// requestTimeoutMiddleware bounds every request, giving the two backup
+// routes a much longer budget than the rest.
+//
+// It replaces chi's middleware.Timeout, which can only apply one duration to
+// a whole router: because a derived context can only ever shorten its
+// parent's deadline, a per-route Timeout nested inside a global one could
+// not have lengthened it.
+func requestTimeoutMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		timeout := defaultRequestTimeout
+		if isLongRunningRequest(r.Method, r.URL.Path) {
+			timeout = backupRequestTimeout
+			// The listener's own write deadline (http.Server.WriteTimeout in
+			// Start) is set per connection and is far shorter than a dump,
+			// so it would tear the connection down long before the handler
+			// finished no matter what the context said. Push it out for
+			// exactly these requests. A failure here is not fatal: it only
+			// means the short deadline stays, which is the behaviour we
+			// already had.
+			// http.ErrNotSupported is not worth a line: it is what any
+			// ResponseWriter that isn't the real server's returns — an
+			// httptest recorder, for one — and those have no write deadline
+			// to extend in the first place.
+			if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout)); err != nil &&
+				!errors.Is(err, http.ErrNotSupported) {
+				log.Printf("WARN [%s %s]: could not extend the write deadline for a long-running request: %v",
+					r.Method, r.URL.Path, err)
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), timeout)
+		defer cancel()
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

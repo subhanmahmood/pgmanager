@@ -8,13 +8,21 @@ import {
   useDeleteDatabase,
   useTables,
 } from '@/hooks/queries'
-import { envSegment, expiringSoon, fmtDate, isExpired, relativeExpiry } from '@/lib/format'
+import {
+  envSegment,
+  expiringSoon,
+  fmtDate,
+  isExpired,
+  relativeExpiry,
+  supportsBackups,
+} from '@/lib/format'
 import { PageHeader } from '@/components/page-header'
 import { EmptyState, ErrorState } from '@/components/states'
 import { EnvBadge } from '@/components/env-badge'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { SecretDialog } from '@/components/secret-dialog'
 import { RotateDialog, RotateTrigger } from '@/components/rotate-dialog'
+import { BackupsCard } from '@/components/backups-card'
 import { CopyField, CopyInline } from '@/components/copy-field'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -269,6 +277,12 @@ export function DatabaseDetailPage() {
               )}
             </CardContent>
           </Card>
+
+          {/* Only where the server would actually accept a backup: not for
+              pr databases (throwaway by design, and every backup route
+              rejects env=pr), and not for a restored one, whose address
+              segment those routes reject as well. */}
+          {supportsBackups(db) && <BackupsCard db={db} />}
         </div>
 
         <div className="lg:col-span-1">

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -236,6 +237,29 @@ func (c *PostgresClient) TestConnection(ctx context.Context, dbName, userName, p
 	defer conn.Close(ctx)
 
 	return conn.Ping(ctx)
+}
+
+// ServerVersionNum returns the connected Postgres server's major version
+// (e.g. 17 for a PostgreSQL 17.x server), derived from the numeric
+// server_version_num setting (e.g. "170004" -> 17). Backups use this at
+// startup to confirm the installed pg_dump/pg_restore client is new enough
+// to talk to the server.
+func (c *PostgresClient) ServerVersionNum(ctx context.Context) (int, error) {
+	conn, err := c.connect(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to connect: %w", err)
+	}
+	defer conn.Close(ctx)
+
+	var numStr string
+	if err := conn.QueryRow(ctx, "SELECT current_setting('server_version_num')").Scan(&numStr); err != nil {
+		return 0, fmt.Errorf("failed to read server_version_num: %w", err)
+	}
+	num, err := strconv.Atoi(numStr)
+	if err != nil {
+		return 0, fmt.Errorf("unexpected server_version_num %q: %w", numStr, err)
+	}
+	return num / 10000, nil
 }
 
 // GeneratePassword generates a secure random password

@@ -316,7 +316,87 @@ docker compose exec pgmanager cat /var/lib/pgmanager/bootstrap-token.txt
 
 Alternative: set `PGMANAGER_BOOTSTRAP_TOKEN=pgm_live_...` in `.env` and restart — pgmanager registers it as the new admin.
 
-## Use Case 6 — Inspect or repair the metadata schema
+## Use Case 7 — Configure backups to S3-compatible storage
+
+Backups (`prod`/`dev`/`staging`, never `pr`) are off by default. To turn them on: pick a bucket,
+create an access key scoped to it (least-privilege: `PutObject`/`GetObject`/`DeleteObject`/`ListBucket`
+on that bucket+prefix only), and fill in `.env` or `pgmanager.yaml`:
+
+```bash
+# .env — R2/B2/MinIO/etc. set PGMANAGER_BACKUP_ENDPOINT; leave it empty for AWS S3.
+PGMANAGER_BACKUP_ENABLED=true
+PGMANAGER_BACKUP_BUCKET=my-pgmanager-backups
+PGMANAGER_BACKUP_ACCESS_KEY_ID=AKIA...
+PGMANAGER_BACKUP_SECRET_ACCESS_KEY=...
+# or, to keep the secret off the .env file entirely:
+# PGMANAGER_BACKUP_SECRET_ACCESS_KEY_FILE=/run/secrets/pgmanager_backup_key
+```
+
+```bash
+docker compose up -d pgmanager
+docker compose logs pgmanager | grep -i backup
+# "Backups enabled: bucket my-pgmanager-backups, schedule 24h0m0s, retention 7"
+```
+
+Then, per database that should be swept automatically:
+
+```bash
+docker compose exec pgmanager pgmanager db backup myapp prod --enable
+```
+
+`--enable` only flips the flag — nothing runs until the next scheduler tick (or `db backup myapp prod`
+with no flags, for an immediate one-off). Verify a snapshot landed:
+
+```bash
+docker compose exec pgmanager pgmanager db backups myapp prod
+```
+
+### Runbook — a backup failed
+
+```bash
+docker compose exec pgmanager pgmanager db backups myapp prod
+# ID   STATUS    SIZE    STARTED              FINISHED
+# 9    failed    -       2026-08-23 03:00:01  2026-08-23 03:00:04
+#      error: pg_dump: connection to server failed: ...
+```
+
+1. **Read the `error` line first** — it's `pg_dump`'s/`pg_restore`'s own stderr, wrapped, not a
+   pgmanager-invented message. Common causes: the target database's role was rotated mid-dump
+   (rare — `runBackup` uses the metadata store's current password), the bucket credentials expired
+   or were revoked, or the bucket/network was briefly unreachable.
+2. **Check the client/server version gate.** At startup the Server runs `pg_dump --version` against
+   the binary baked into its own image (`postgresql17-client`, from `Dockerfile`) and refuses to
+   enable backups at all if it's older than the Postgres server's major version — that failure shows
+   up as three `ERROR` lines in `docker compose logs pgmanager` right after start, not as a per-backup
+   failure. If backups never ran a single time, check there, not the per-database list.
+3. **A single failed row never blocks the next attempt** — the scheduler and `db backup` both just
+   try again on their own schedule/on demand. Failed rows are retained (trimmed to `retention`,
+   independently from succeeded ones) so the history survives.
+4. **The failed dump left no S3 object.** `runBackup` deletes the (possibly partial) object on any
+   failure before recording the row as `failed`, so there's nothing to clean up in the bucket by hand.
+5. **If backups are 503ing entirely** (`backups are not configured on this server`), the Server
+   disabled itself at startup — `docker compose logs pgmanager` names the step (`config`/`init`/
+   `version check`/`probe`) and the reason, but never the secret. Fix the config, then
+   `docker compose restart pgmanager`; it re-probes on every start, there is no separate re-enable
+   command.
+
+## Use Case 8 — Restore a backup
+
+Restore always creates a **brand-new** database — the source is never opened or written to, so
+there's no "are you sure" moment where the wrong choice destroys data:
+
+```bash
+docker compose exec pgmanager pgmanager db backups myapp prod            # find a succeeded id
+docker compose exec pgmanager pgmanager db restore myapp prod 9 --json > restored.json
+jq -r .env restored.json          # e.g. "prod_restore_20260823T101500" — copy this verbatim
+```
+
+The new database (`myapp_prod_restore_20260823T101500`, its own role and password) never expires and
+is invisible to `pgmanager cleanup` — delete it explicitly with
+`pgmanager db delete myapp "$(jq -r .env restored.json)"` once you're done with it, or it sits there
+indefinitely.
+
+## Use Case 9 — Inspect or repair the metadata schema
 
 The metadata lives in a `pgmanager` schema in the same Postgres server. Useful read-only queries:
 
@@ -325,6 +405,11 @@ sudo docker exec postgres psql -U postgres <<'SQL'
 \dt pgmanager.*
 SELECT name, scopes, revoked_at, expires_at FROM pgmanager.tokens ORDER BY created_at DESC;
 SELECT project, env, pr_number, created_at, expires_at FROM pgmanager.databases ORDER BY created_at DESC LIMIT 20;
+-- Snapshot history. object_key is the S3 key; error is only set on failed rows.
+-- restored_from on pgmanager.databases (above) points back at the backup id a
+-- restored database came from — there is no reverse index the other way.
+SELECT database_id, status, size_bytes, started_at, finished_at, error
+  FROM pgmanager.backups ORDER BY started_at DESC LIMIT 20;
 -- In-flight `pgmanager login` attempts. Rows expire after 10 minutes and are
 -- purged at startup and on `pgmanager cleanup`.
 SELECT user_code, client_name, client_ip, status, approved_by, expires_at
@@ -372,6 +457,16 @@ crypto:
 data_dir: /var/lib/pgmanager   # bootstrap-token.txt lives here
 cleanup:
   default_ttl: 168h
+backup:                   # per-database backups to S3-compatible storage; opt-in, off by default
+  enabled: false
+  endpoint: ""              # empty = AWS S3; set for R2/B2/MinIO/etc.
+  region: ""
+  bucket: ""
+  prefix: "pgmanager/"       # always normalized to end in "/"
+  access_key_id: ""
+  secret_access_key: ""      # or secret_access_key_file — never logged, never returned by the API
+  schedule: 24h                # how often the in-process scheduler sweeps due databases
+  retention: 7                  # succeeded snapshots kept per database (failed ones trimmed separately)
 ```
 
 ### Environment variables
@@ -391,6 +486,11 @@ cleanup:
 | `PGMANAGER_ENCRYPTION_KEY` | base64 32-byte at-rest encryption key |
 | `PGMANAGER_DATA_DIR` | Where `bootstrap-token.txt` is written |
 | `PGMANAGER_BOOTSTRAP_TOKEN` | Operator-supplied initial admin token (skip auto-generation) |
+| `PGMANAGER_BACKUP_ENABLED` | `true` to turn on per-database backups (default false) |
+| `PGMANAGER_BACKUP_ENDPOINT` / `_REGION` / `_BUCKET` / `_PREFIX` | Where backups go; empty endpoint means AWS S3 |
+| `PGMANAGER_BACKUP_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` / `_SECRET_ACCESS_KEY_FILE` | Bucket credentials; the secret is never logged and never returned by the API |
+| `PGMANAGER_BACKUP_SCHEDULE` | How often the scheduler sweeps for due databases (Go duration, e.g. `24h`; bad values are silently ignored) |
+| `PGMANAGER_BACKUP_RETENTION` | Succeeded snapshots kept per database (default `7`) |
 
 The bundled `examples/deploy/docker-compose.yml` reads all of these from `.env`.
 
@@ -408,6 +508,9 @@ The bundled `examples/deploy/docker-compose.yml` reads all of these from `.env`.
 | Caddy can't fetch a cert | DNS not pointing at the VPS, or port 80/443 blocked | `curl -I http://pgm.example.com` from outside; `docker compose logs caddy` |
 | pgmanager container is healthy but `/api/health` 502s through Caddy | Caddy → pgmanager network mismatch | `docker compose ps`; ensure both are on `postgres-net`; check Caddyfile target hostname matches the service name |
 | Upgrade-then-rollback: old container won't come back | New release migrated the schema | The Server only adds columns; rollback usually works. Worst case, restore from the `pg_dump` backup from before the upgrade. |
+| Backups all 503 with `backups are not configured on this server` | `backup.enabled` is false, or `Validate()`/bucket probe failed at startup | `docker compose logs pgmanager \| grep -i backup` — the ERROR lines name which startup step failed and why (never the secret); fix `backup:` and restart |
+| A single backup shows `status: failed` | `pg_dump`/upload error for that run only — see Use Case 7's runbook | `pgmanager db backups <project> <env>` for the `error` column; the scheduler/`db backup` will simply try again |
+| `db restore` returns `backup has not completed successfully` | Chosen backup is `running` or `failed`, not `succeeded` | Pick a `succeeded` id from `db backups` |
 
 `pgmanager doctor` (run on the client side from your laptop) reports active profile, mode, server reachability, and whoami — useful as a smoke test after any Server change.
 
@@ -421,4 +524,6 @@ The bundled `examples/deploy/docker-compose.yml` reads all of these from `.env`.
 4. **Task is "I can't get in / no admin token works"** → Use Case 5.
 5. **Task is "who's been calling the API?"** → Use Case 4 (audit log tail).
 6. **Task is "switch Postgres to add pgvector/postgis/etc."** → Image-swap procedure. Back up first, swap the image:, recreate just postgres, verify `pg_available_extensions`.
-7. **Task is anything client-side** (create a DB, mint a token, set up CI) → wrong skill; use `pgmanager`.
+7. **Task is "set up / debug backups to S3"** → Use Case 7 (config + enable per-database), or its runbook if a backup already failed.
+8. **Task is "restore a database from a backup"** → Use Case 8. Always creates a new database; the source is untouched.
+9. **Task is anything client-side** (create a DB, mint a token, set up CI, run `db backup`/`db restore` day-to-day) → wrong skill; use `pgmanager`.

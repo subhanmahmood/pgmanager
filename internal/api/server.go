@@ -19,7 +19,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"pgmanager/internal/auth"
+	"pgmanager/internal/backup"
 	"pgmanager/internal/config"
+	"pgmanager/internal/db"
 	"pgmanager/internal/meta"
 	"pgmanager/internal/project"
 )
@@ -67,7 +69,9 @@ func (s *Server) buildRouter(authMW func(http.Handler) http.Handler) *chi.Mux {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Timeout(60 * time.Second))
+	// Deadlines are per-route: the backup and restore routes get a far
+	// longer budget than everything else. See requestTimeoutMiddleware.
+	r.Use(requestTimeoutMiddleware)
 
 	r.Use(securityHeadersMiddleware)
 
@@ -127,6 +131,14 @@ func (s *Server) buildRouter(authMW func(http.Handler) http.Handler) *chi.Mux {
 		r.Post("/projects/{name}/databases/{env}/tables/{table}/rows", s.createRow)
 		r.Patch("/projects/{name}/databases/{env}/tables/{table}/rows", s.updateRow)
 		r.Delete("/projects/{name}/databases/{env}/tables/{table}/rows", s.deleteRow)
+
+		// Backups — never available for `pr` databases. Same scope check as
+		// every other database route.
+		r.Put("/projects/{name}/databases/{env}/backup", s.setBackupEnabled)
+		r.Post("/projects/{name}/databases/{env}/backups", s.createBackup)
+		r.Get("/projects/{name}/databases/{env}/backups", s.listBackups)
+		r.Delete("/projects/{name}/databases/{env}/backups/{id}", s.deleteBackup)
+		r.Post("/projects/{name}/databases/{env}/backups/{id}/restore", s.restoreBackup)
 
 		r.Post("/cleanup", s.cleanup)
 	})
@@ -210,6 +222,13 @@ func (s *Server) Start() error {
 		log.Printf("(It talks to Postgres directly using this config, so it works whether or not the admin socket is enabled.)")
 	}
 
+	// Wire up backups, if configured. A misconfigured bucket disables
+	// backups (loudly) rather than stopping the server — database
+	// provisioning must not go down over a bucket typo.
+	if backupStop := s.initBackups(); backupStop != nil {
+		defer close(backupStop)
+	}
+
 	srv := &http.Server{
 		Addr:         s.addr,
 		Handler:      s.router,
@@ -253,6 +272,82 @@ func (s *Server) Start() error {
 		}
 	}
 	return nil
+}
+
+// initBackups wires up backup storage and starts the scheduler when
+// cfg.Backup.Enabled. Any failure along the way — bad config, an S3 client
+// that can't be constructed, a Postgres version we can't read, or an
+// incompatible/missing pg_dump — disables backups and logs loudly instead of
+// failing the whole server: taking database provisioning down over a bucket
+// typo would be worse than the typo. Returns a channel to close at shutdown
+// to stop the scheduler ticker, or nil if the scheduler was never started.
+func (s *Server) initBackups() chan struct{} {
+	if !s.cfg.Backup.Enabled {
+		return nil
+	}
+
+	disable := func(step string, err error) {
+		log.Printf("ERROR [backup %s]: %v", step, err)
+		log.Printf("ERROR [backup %s]: backups are disabled; database provisioning is unaffected", step)
+		log.Printf("ERROR [backup %s]: fix the problem above and restart pgmanager to re-enable backups", step)
+		s.mgr.DisableBackups(err)
+	}
+
+	if err := s.cfg.Backup.Validate(); err != nil {
+		disable("config", err)
+		return nil
+	}
+
+	objects, err := backup.NewS3Store(s.cfg.Backup)
+	if err != nil {
+		disable("init", err)
+		return nil
+	}
+
+	dumper := backup.NewDumper()
+	pgClient := db.NewPostgresClient(&s.cfg.Postgres)
+	serverMajor, err := pgClient.ServerVersionNum(context.Background())
+	if err != nil {
+		disable("version check", err)
+		return nil
+	}
+	if err := backup.Probe(context.Background(), dumper, serverMajor); err != nil {
+		disable("probe", err)
+		return nil
+	}
+
+	s.mgr.EnableBackups(objects, dumper)
+	log.Printf("Backups enabled: bucket %s, schedule %s, retention %d", s.cfg.Backup.Bucket, s.cfg.Backup.Schedule, s.cfg.Backup.Retention)
+
+	stop := make(chan struct{})
+
+	// The sweep runs on a context tied to stop, so shutting the server down
+	// cancels a backup already in flight instead of waiting out its own
+	// (bounded) deadline. RunDueBackups additionally bounds each database's
+	// backup individually — see scheduledBackupTimeout.
+	schedCtx, cancelSched := context.WithCancel(context.Background())
+	go func() {
+		<-stop
+		cancelSched()
+	}()
+
+	ticker := time.NewTicker(s.cfg.Backup.Schedule)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if n, err := s.mgr.RunDueBackups(schedCtx); err != nil {
+					log.Printf("ERROR [backup scheduler]: %v", err)
+				} else if n > 0 {
+					log.Printf("Backup scheduler: ran %d backup(s)", n)
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+	return stop
 }
 
 // startSocketServer brings up the local admin listener when api.socket is

@@ -73,6 +73,27 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 	CREATE INDEX IF NOT EXISTS idx_databases_env ON pgmanager.databases(env);
 	CREATE INDEX IF NOT EXISTS idx_databases_expires_at ON pgmanager.databases(expires_at);
 
+	CREATE TABLE IF NOT EXISTS pgmanager.backups (
+		id SERIAL PRIMARY KEY,
+		database_id INTEGER NOT NULL REFERENCES pgmanager.databases(id) ON DELETE CASCADE,
+		object_key TEXT NOT NULL,
+		size_bytes BIGINT NOT NULL DEFAULT 0,
+		status TEXT NOT NULL DEFAULT 'running',
+		error TEXT,
+		started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		finished_at TIMESTAMPTZ
+	);
+	CREATE INDEX IF NOT EXISTS idx_backups_database_id ON pgmanager.backups(database_id);
+	CREATE INDEX IF NOT EXISTS idx_backups_started_at ON pgmanager.backups(started_at);
+
+	ALTER TABLE pgmanager.databases ADD COLUMN IF NOT EXISTS backups_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+	-- restored_from names the backup this database was restored from. It is a
+	-- plain column with no foreign key on purpose: deleting the source backup
+	-- must not cascade into (delete) the restored database's own row, and a
+	-- plain column avoids an ordering constraint between the two ALTERs/CREATE
+	-- TABLEs inside this single Exec.
+	ALTER TABLE pgmanager.databases ADD COLUMN IF NOT EXISTS restored_from INTEGER;
+
 	CREATE TABLE IF NOT EXISTS pgmanager.tokens (
 		id SERIAL PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -329,10 +350,12 @@ func (s *PostgresStore) CreateDatabase(ctx context.Context, projectID int64, nam
 	}, nil
 }
 
-const dbSelect = `SELECT id, project_id, name, user_name, password_ct, env, pr_number, created_at, expires_at FROM pgmanager.databases`
+const dbSelect = `SELECT id, project_id, name, user_name, password_ct, env, pr_number, created_at, expires_at, backups_enabled, restored_from FROM pgmanager.databases`
 
 func (s *PostgresStore) GetDatabase(ctx context.Context, projectID int64, env string, prNumber *int) (*Database, error) {
-	query := dbSelect + ` WHERE project_id = $1 AND env = $2`
+	// Restored databases carry the source env, so they would make this lookup
+	// ambiguous. They are addressed by database name instead.
+	query := dbSelect + ` WHERE project_id = $1 AND env = $2 AND restored_from IS NULL`
 	args := []interface{}{projectID, env}
 	if prNumber != nil {
 		query += " AND pr_number = $3"
@@ -401,8 +424,9 @@ func (s *PostgresStore) scanOne(ctx context.Context, query string, args ...inter
 	var ct []byte
 	var expiresAt *time.Time
 	var prNum *int
+	var restoredFrom *int64
 	err := s.pool.QueryRow(ctx, query, args...).Scan(
-		&d.ID, &d.ProjectID, &d.Name, &d.UserName, &ct, &d.Env, &prNum, &d.CreatedAt, &expiresAt,
+		&d.ID, &d.ProjectID, &d.Name, &d.UserName, &ct, &d.Env, &prNum, &d.CreatedAt, &expiresAt, &d.BackupsEnabled, &restoredFrom,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -417,6 +441,7 @@ func (s *PostgresStore) scanOne(ctx context.Context, query string, args ...inter
 	d.Password = pw
 	d.PRNumber = prNum
 	d.ExpiresAt = expiresAt
+	d.RestoredFrom = restoredFrom
 	return &d, nil
 }
 
@@ -433,7 +458,8 @@ func (s *PostgresStore) scanMany(ctx context.Context, query string, args ...inte
 		var ct []byte
 		var expiresAt *time.Time
 		var prNum *int
-		if err := rows.Scan(&d.ID, &d.ProjectID, &d.Name, &d.UserName, &ct, &d.Env, &prNum, &d.CreatedAt, &expiresAt); err != nil {
+		var restoredFrom *int64
+		if err := rows.Scan(&d.ID, &d.ProjectID, &d.Name, &d.UserName, &ct, &d.Env, &prNum, &d.CreatedAt, &expiresAt, &d.BackupsEnabled, &restoredFrom); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
 		pw, err := s.decryptPassword(ct)
@@ -443,6 +469,7 @@ func (s *PostgresStore) scanMany(ctx context.Context, query string, args ...inte
 		d.Password = pw
 		d.PRNumber = prNum
 		d.ExpiresAt = expiresAt
+		d.RestoredFrom = restoredFrom
 		out = append(out, d)
 	}
 	return out, rows.Err()
@@ -918,4 +945,152 @@ func (s *PostgresStore) DeleteExpiredSessions(ctx context.Context) (int, error) 
 		return 0, fmt.Errorf("delete expired sessions: %w", err)
 	}
 	return int(result.RowsAffected()), nil
+}
+
+// --- Backup operations -------------------------------------------------------
+
+func (s *PostgresStore) SetBackupsEnabled(ctx context.Context, dbName string, enabled bool) error {
+	result, err := s.pool.Exec(ctx,
+		`UPDATE pgmanager.databases SET backups_enabled = $1 WHERE name = $2`, enabled, dbName)
+	if err != nil {
+		return fmt.Errorf("failed to set backups_enabled: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("database not found: %s", dbName)
+	}
+	return nil
+}
+
+func (s *PostgresStore) ListBackupEnabledDatabases(ctx context.Context) ([]Database, error) {
+	return s.scanMany(ctx, dbSelect+` WHERE backups_enabled = TRUE AND restored_from IS NULL ORDER BY name`)
+}
+
+func (s *PostgresStore) CreateBackup(ctx context.Context, databaseID int64, key string) (*Backup, error) {
+	var b Backup
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO pgmanager.backups (database_id, object_key, status)
+		 VALUES ($1, $2, $3)
+		 RETURNING id, database_id, object_key, size_bytes, status, started_at`,
+		databaseID, key, BackupStatusRunning,
+	).Scan(&b.ID, &b.DatabaseID, &b.Key, &b.SizeBytes, &b.Status, &b.StartedAt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create backup: %w", err)
+	}
+	return &b, nil
+}
+
+func (s *PostgresStore) FinishBackup(ctx context.Context, id int64, size int64, status, errMsg string) error {
+	var errArg *string
+	if errMsg != "" {
+		errArg = &errMsg
+	}
+	result, err := s.pool.Exec(ctx,
+		`UPDATE pgmanager.backups SET size_bytes = $1, status = $2, error = $3, finished_at = CURRENT_TIMESTAMP WHERE id = $4`,
+		size, status, errArg, id,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to finish backup: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("backup not found: %d", id)
+	}
+	return nil
+}
+
+const backupSelect = `SELECT id, database_id, object_key, size_bytes, status, error, started_at, finished_at FROM pgmanager.backups`
+
+func (s *PostgresStore) GetBackup(ctx context.Context, id int64) (*Backup, error) {
+	b, err := s.scanOneBackup(ctx, backupSelect+` WHERE id = $1`, id)
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func (s *PostgresStore) ListBackups(ctx context.Context, databaseID int64) ([]Backup, error) {
+	rows, err := s.pool.Query(ctx, backupSelect+` WHERE database_id = $1 ORDER BY started_at DESC, id DESC`, databaseID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list backups: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Backup
+	for rows.Next() {
+		b, err := scanBackupRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan backup: %w", err)
+		}
+		out = append(out, *b)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) DeleteBackup(ctx context.Context, id int64) error {
+	result, err := s.pool.Exec(ctx, `DELETE FROM pgmanager.backups WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete backup: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("backup not found: %d", id)
+	}
+	return nil
+}
+
+func (s *PostgresStore) scanOneBackup(ctx context.Context, query string, args ...interface{}) (*Backup, error) {
+	var b Backup
+	var errCol *string
+	err := s.pool.QueryRow(ctx, query, args...).Scan(
+		&b.ID, &b.DatabaseID, &b.Key, &b.SizeBytes, &b.Status, &errCol, &b.StartedAt, &b.FinishedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query: %w", err)
+	}
+	b.Error = derefString(errCol)
+	return &b, nil
+}
+
+func scanBackupRow(rows pgx.Rows) (*Backup, error) {
+	var b Backup
+	var errCol *string
+	if err := rows.Scan(&b.ID, &b.DatabaseID, &b.Key, &b.SizeBytes, &b.Status, &errCol, &b.StartedAt, &b.FinishedAt); err != nil {
+		return nil, err
+	}
+	b.Error = derefString(errCol)
+	return &b, nil
+}
+
+// CreateRestoredDatabase inserts a database row for a freshly restored
+// database, recording the backup it came from. It never touches the source
+// database or its backup rows.
+func (s *PostgresStore) CreateRestoredDatabase(ctx context.Context, projectID, backupID int64, name, userName, password, env string) (*Database, error) {
+	ct, err := s.encryptPassword(password)
+	if err != nil {
+		return nil, err
+	}
+	var id int64
+	var createdAt time.Time
+	err = s.pool.QueryRow(ctx,
+		`INSERT INTO pgmanager.databases (project_id, name, user_name, password_ct, env, restored_from)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id, created_at`,
+		projectID, name, userName, ct, env, backupID,
+	).Scan(&id, &createdAt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create restored database: %w", err)
+	}
+
+	bid := backupID
+	return &Database{
+		ID:           id,
+		ProjectID:    projectID,
+		Name:         name,
+		UserName:     userName,
+		Password:     password,
+		Env:          env,
+		CreatedAt:    createdAt,
+		RestoredFrom: &bid,
+	}, nil
 }

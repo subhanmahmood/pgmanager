@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -45,6 +46,10 @@ type DatabaseResponse struct {
 	ConnString   string  `json:"connection_string"`
 	CreatedAt    string  `json:"created_at"`
 	ExpiresAt    *string `json:"expires_at,omitempty"`
+	// BackupsEnabled is always serialized, never omitted: the admin UI's
+	// toggle and the CLI both read it as the authoritative state, and an
+	// absent field would be indistinguishable from "off".
+	BackupsEnabled bool `json:"backups_enabled"`
 }
 
 // DatabaseInfoResponse is returned when listing/getting databases (no sensitive info).
@@ -58,6 +63,12 @@ type DatabaseInfoResponse struct {
 	Port         int     `json:"port"`
 	CreatedAt    string  `json:"created_at"`
 	ExpiresAt    *string `json:"expires_at,omitempty"`
+	// BackupsEnabled is always serialized, never omitted — see
+	// DatabaseResponse.BackupsEnabled.
+	BackupsEnabled bool `json:"backups_enabled"`
+	// RestoredFrom holds the source backup's ID when this database was
+	// created by a restore, and is omitted otherwise.
+	RestoredFrom *int64 `json:"restored_from,omitempty"`
 }
 
 type CreateProjectRequest struct {
@@ -207,15 +218,17 @@ func (s *Server) listDatabases(w http.ResponseWriter, r *http.Request) {
 			expiresAt = &t
 		}
 		response[i] = DatabaseInfoResponse{
-			Project:      info.Project,
-			Env:          info.Env,
-			PRNumber:     info.PRNumber,
-			DatabaseName: info.DatabaseName,
-			UserName:     info.UserName,
-			Host:         host,
-			Port:         port,
-			CreatedAt:    info.CreatedAt.Format(time.RFC3339),
-			ExpiresAt:    expiresAt,
+			Project:        info.Project,
+			Env:            info.Env,
+			PRNumber:       info.PRNumber,
+			DatabaseName:   info.DatabaseName,
+			UserName:       info.UserName,
+			Host:           host,
+			Port:           port,
+			CreatedAt:      info.CreatedAt.Format(time.RFC3339),
+			ExpiresAt:      expiresAt,
+			BackupsEnabled: info.BackupsEnabled,
+			RestoredFrom:   info.RestoredFrom,
 		}
 	}
 	writeJSON(w, http.StatusOK, response)
@@ -264,17 +277,18 @@ func (s *Server) createDatabase(w http.ResponseWriter, r *http.Request) {
 	}
 	host, port, connStr := s.withPublicHost(r, info.DatabaseName, info.UserName, info.Password)
 	writeJSON(w, http.StatusCreated, DatabaseResponse{
-		Project:      info.Project,
-		Env:          info.Env,
-		PRNumber:     info.PRNumber,
-		DatabaseName: info.DatabaseName,
-		UserName:     info.UserName,
-		Password:     info.Password,
-		Host:         host,
-		Port:         port,
-		ConnString:   connStr,
-		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
-		ExpiresAt:    expiresAt,
+		Project:        info.Project,
+		Env:            info.Env,
+		PRNumber:       info.PRNumber,
+		DatabaseName:   info.DatabaseName,
+		UserName:       info.UserName,
+		Password:       info.Password,
+		Host:           host,
+		Port:           port,
+		ConnString:     connStr,
+		CreatedAt:      info.CreatedAt.Format(time.RFC3339),
+		ExpiresAt:      expiresAt,
+		BackupsEnabled: info.BackupsEnabled,
 	})
 }
 
@@ -286,7 +300,7 @@ func (s *Server) getDatabase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: env}
+	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: scopeEnv(env)}
 	if prNumber != nil {
 		scopeReq.PR = *prNumber
 	}
@@ -307,15 +321,17 @@ func (s *Server) getDatabase(w http.ResponseWriter, r *http.Request) {
 	}
 	host, port := s.publicHostPort(r)
 	writeJSON(w, http.StatusOK, DatabaseInfoResponse{
-		Project:      info.Project,
-		Env:          info.Env,
-		PRNumber:     info.PRNumber,
-		DatabaseName: info.DatabaseName,
-		UserName:     info.UserName,
-		Host:         host,
-		Port:         port,
-		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
-		ExpiresAt:    expiresAt,
+		Project:        info.Project,
+		Env:            info.Env,
+		PRNumber:       info.PRNumber,
+		DatabaseName:   info.DatabaseName,
+		UserName:       info.UserName,
+		Host:           host,
+		Port:           port,
+		CreatedAt:      info.CreatedAt.Format(time.RFC3339),
+		ExpiresAt:      expiresAt,
+		BackupsEnabled: info.BackupsEnabled,
+		RestoredFrom:   info.RestoredFrom,
 	})
 }
 
@@ -330,7 +346,7 @@ func (s *Server) getDatabaseCredentials(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: env}
+	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: scopeEnv(env)}
 	if prNumber != nil {
 		scopeReq.PR = *prNumber
 	}
@@ -350,17 +366,18 @@ func (s *Server) getDatabaseCredentials(w http.ResponseWriter, r *http.Request) 
 	}
 	host, port, connStr := s.withPublicHost(r, info.DatabaseName, info.UserName, info.Password)
 	writeJSON(w, http.StatusOK, DatabaseResponse{
-		Project:      info.Project,
-		Env:          info.Env,
-		PRNumber:     info.PRNumber,
-		DatabaseName: info.DatabaseName,
-		UserName:     info.UserName,
-		Password:     info.Password,
-		Host:         host,
-		Port:         port,
-		ConnString:   connStr,
-		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
-		ExpiresAt:    expiresAt,
+		Project:        info.Project,
+		Env:            info.Env,
+		PRNumber:       info.PRNumber,
+		DatabaseName:   info.DatabaseName,
+		UserName:       info.UserName,
+		Password:       info.Password,
+		Host:           host,
+		Port:           port,
+		ConnString:     connStr,
+		CreatedAt:      info.CreatedAt.Format(time.RFC3339),
+		ExpiresAt:      expiresAt,
+		BackupsEnabled: info.BackupsEnabled,
 	})
 }
 
@@ -375,7 +392,13 @@ func (s *Server) rotateDatabasePassword(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: env}
+	// scopeEnv, not the raw segment: RotatePassword resolves restored
+	// databases (it goes through resolveDatabase), so this route can be
+	// addressed at "prod_restore_<ts>" like getDatabase and deleteDatabase
+	// are. Authorizing the raw segment would leave rotation as the one
+	// operation a prod-scoped token could not perform on a database it can
+	// already read, browse and delete.
+	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: scopeEnv(env)}
 	if prNumber != nil {
 		scopeReq.PR = *prNumber
 	}
@@ -400,17 +423,18 @@ func (s *Server) rotateDatabasePassword(w http.ResponseWriter, r *http.Request) 
 	}
 	host, port, connStr := s.withPublicHost(r, info.DatabaseName, info.UserName, info.Password)
 	writeJSON(w, http.StatusOK, DatabaseResponse{
-		Project:      info.Project,
-		Env:          info.Env,
-		PRNumber:     info.PRNumber,
-		DatabaseName: info.DatabaseName,
-		UserName:     info.UserName,
-		Password:     info.Password,
-		Host:         host,
-		Port:         port,
-		ConnString:   connStr,
-		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
-		ExpiresAt:    expiresAt,
+		Project:        info.Project,
+		Env:            info.Env,
+		PRNumber:       info.PRNumber,
+		DatabaseName:   info.DatabaseName,
+		UserName:       info.UserName,
+		Password:       info.Password,
+		Host:           host,
+		Port:           port,
+		ConnString:     connStr,
+		CreatedAt:      info.CreatedAt.Format(time.RFC3339),
+		ExpiresAt:      expiresAt,
+		BackupsEnabled: info.BackupsEnabled,
 	})
 }
 
@@ -422,7 +446,7 @@ func (s *Server) deleteDatabase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: env}
+	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: scopeEnv(env)}
 	if prNumber != nil {
 		scopeReq.PR = *prNumber
 	}
@@ -529,6 +553,22 @@ func parseEnvParam(env string) (*int, string, error) {
 		return &num, "pr", nil
 	}
 	return nil, env, nil
+}
+
+// restoreSegmentRe matches the env path segment of a restored database, e.g.
+// "dev_restore_20260823T101500".
+var restoreSegmentRe = regexp.MustCompile(`^(prod|dev|staging)_restore_\d{8}T\d{6}$`)
+
+// scopeEnv returns the environment a path segment is authorized as. A
+// restored database holds the data of the environment it came from, so it is
+// governed by that environment's scope — a token scoped to "dev" must never
+// be able to reach "prod_restore_<ts>", which holds production data. Any
+// segment that isn't a restore segment is returned unchanged.
+func scopeEnv(segment string) string {
+	if m := restoreSegmentRe.FindStringSubmatch(segment); m != nil {
+		return m[1]
+	}
+	return segment
 }
 
 // parseDuration parses a duration string like "7d", "24h", "1w".

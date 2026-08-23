@@ -9,8 +9,28 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+)
+
+// Client-side deadlines.
+//
+// requestTimeout covers every ordinary call: they are metadata lookups and
+// short DDL statements, and 30 seconds is already generous.
+//
+// backupTimeout covers the two calls that wait on a whole database moving —
+// CreateBackup runs pg_dump straight into the bucket, RestoreBackup streams
+// an object back through pg_restore. Under the ordinary deadline
+// `pgmanager db backup` aborted after 30 seconds no matter how healthy the
+// server was, which no real database survives. It is deliberately a little
+// longer than the server's own budget for those routes
+// (backupRequestTimeout in internal/api/middleware.go) so that when a backup
+// really does run too long, the client receives the server's error instead
+// of the transport giving up first and reporting nothing useful.
+const (
+	requestTimeout = 30 * time.Second
+	backupTimeout  = 65 * time.Minute
 )
 
 // HTTPClient talks to a remote `pgmanager serve` instance over HTTPS.
@@ -18,17 +38,22 @@ type HTTPClient struct {
 	baseURL string
 	token   string
 	http    *http.Client
+	// longHTTP uses the same transport as http — the default one, or the
+	// unix-socket dialer — but carries backupTimeout instead of
+	// requestTimeout. http.Client.Timeout is a per-client setting, so a
+	// second client is the only way to give two calls a different budget
+	// from the rest.
+	longHTTP *http.Client
 }
 
 // NewHTTP creates a new HTTPClient. baseURL should be the scheme+host
 // (e.g., "https://pgm.example.com"); /api is added automatically.
 func NewHTTP(baseURL, token string) *HTTPClient {
 	return &HTTPClient{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   token,
-		http: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		baseURL:  strings.TrimRight(baseURL, "/"),
+		token:    token,
+		http:     &http.Client{Timeout: requestTimeout},
+		longHTTP: &http.Client{Timeout: backupTimeout},
 	}
 }
 
@@ -36,19 +61,18 @@ func NewHTTP(baseURL, token string) *HTTPClient {
 // local unix socket. There is no token: reaching the socket at all is the
 // credential, and the server grants admin on that basis.
 func NewUnix(socketPath string) *HTTPClient {
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", socketPath)
+		},
+	}
 	return &HTTPClient{
 		// The host in the URL is never resolved — the dialer ignores it — but
 		// net/http still requires a well-formed one.
-		baseURL: "http://pgmanager.local",
-		http: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					var d net.Dialer
-					return d.DialContext(ctx, "unix", socketPath)
-				},
-			},
-		},
+		baseURL:  "http://pgmanager.local",
+		http:     &http.Client{Timeout: requestTimeout, Transport: transport},
+		longHTTP: &http.Client{Timeout: backupTimeout, Transport: transport},
 	}
 }
 
@@ -65,6 +89,16 @@ func (e *APIError) Error() string {
 }
 
 func (c *HTTPClient) do(ctx context.Context, method, path string, body, into interface{}) error {
+	return c.doWith(ctx, c.http, method, path, body, into)
+}
+
+// doLong is do for the two requests that wait on pg_dump or pg_restore. See
+// backupTimeout.
+func (c *HTTPClient) doLong(ctx context.Context, method, path string, body, into interface{}) error {
+	return c.doWith(ctx, c.longHTTP, method, path, body, into)
+}
+
+func (c *HTTPClient) doWith(ctx context.Context, httpClient *http.Client, method, path string, body, into interface{}) error {
 	var reader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -85,7 +119,7 @@ func (c *HTTPClient) do(ctx context.Context, method, path string, body, into int
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := c.http.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("request %s %s: %w", method, u, err)
 	}
@@ -179,6 +213,44 @@ func (c *HTTPClient) RotatePassword(ctx context.Context, projectName, env string
 
 func (c *HTTPClient) DeleteDatabase(ctx context.Context, projectName, env string, prNumber *int) error {
 	return c.do(ctx, http.MethodDelete, dbPath(projectName, env, prNumber), nil, nil)
+}
+
+func (c *HTTPClient) SetBackupsEnabled(ctx context.Context, projectName, env string, prNumber *int, enabled bool) error {
+	path := dbPath(projectName, env, prNumber) + "/backup"
+	body := map[string]bool{"enabled": enabled}
+	return c.do(ctx, http.MethodPut, path, body, nil)
+}
+
+func (c *HTTPClient) ListBackups(ctx context.Context, projectName, env string, prNumber *int) ([]Backup, error) {
+	path := dbPath(projectName, env, prNumber) + "/backups"
+	var out []Backup
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *HTTPClient) CreateBackup(ctx context.Context, projectName, env string, prNumber *int) (*Backup, error) {
+	path := dbPath(projectName, env, prNumber) + "/backups"
+	var out Backup
+	if err := c.doLong(ctx, http.MethodPost, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *HTTPClient) DeleteBackup(ctx context.Context, projectName, env string, prNumber *int, backupID int64) error {
+	path := dbPath(projectName, env, prNumber) + "/backups/" + strconv.FormatInt(backupID, 10)
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
+func (c *HTTPClient) RestoreBackup(ctx context.Context, projectName, env string, prNumber *int, backupID int64) (*Database, error) {
+	path := dbPath(projectName, env, prNumber) + "/backups/" + strconv.FormatInt(backupID, 10) + "/restore"
+	var out Database
+	if err := c.doLong(ctx, http.MethodPost, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func (c *HTTPClient) Cleanup(ctx context.Context, olderThan time.Duration) ([]string, error) {

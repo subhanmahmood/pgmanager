@@ -6,11 +6,40 @@ export function envSegment(db: Pick<DatabaseInfo, 'env' | 'pr_number'>): string 
   return db.pr_number ? `pr_${db.pr_number}` : db.env
 }
 
+/** Whether the server's backup routes accept this database at all.
+ *
+ *  Two exclusions, both server-side facts rather than UI preferences:
+ *  every backup route rejects `env=pr` outright, and a restored database is
+ *  addressed by a segment like "dev_restore_20260823T101500", which the
+ *  backup routes' own ValidateEnv rejects — the scheduler skips restored
+ *  rows too. Rendering the card for either offers a toggle and a "Back up
+ *  now" button whose requests fail, above a history that is always empty. */
+export function supportsBackups(
+  db: Pick<DatabaseInfo, 'env' | 'restored_from'>,
+): boolean {
+  if (db.restored_from != null) return false
+  return db.env === 'dev' || db.env === 'staging' || db.env === 'prod'
+}
+
 /** Inverse of envSegment, for reading a route param back. */
 export function parseEnvSegment(segment: string): { env: string; prNumber?: number } {
   const m = /^pr_(\d+)$/.exec(segment)
   if (m) return { env: 'pr', prNumber: Number(m[1]) }
   return { env: segment }
+}
+
+/** Human-readable byte size, matching cmd/pgmanager's humanBytes (KiB/MiB/... at 1024). */
+export function fmtBytes(n: number): string {
+  const unit = 1024
+  if (!Number.isFinite(n) || n < unit) return `${n} B`
+  const units = 'KMGTPE'
+  let div = unit
+  let exp = 0
+  for (let m = n / unit; m >= unit; m /= unit) {
+    div *= unit
+    exp++
+  }
+  return `${(n / div).toFixed(1)} ${units[exp]}iB`
 }
 
 export function fmtDate(s?: string | null): string {

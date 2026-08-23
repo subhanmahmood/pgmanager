@@ -248,6 +248,12 @@ pgmanager auth deny <code>         Reject a device
 pgmanager project create|list|delete
 pgmanager db create|list|info|credentials|delete
                                    db create accepts -x/--extension (repeatable)
+pgmanager db backup <project> <env> [pr-number]
+                                   Back up now; --enable/--disable toggle the schedule instead
+pgmanager db backups <project> <env> [pr-number]
+                                   List backup snapshots (id, status, size, started, finished)
+pgmanager db restore <project> <env> <backup-id>
+                                   Restore a snapshot into a brand-new database
 pgmanager cleanup --older-than 7d  Delete expired PR DBs
 pgmanager tui                      Interactive terminal UI
 pgmanager keygen                   New 32-byte base64 encryption key
@@ -304,6 +310,8 @@ The most important environment overrides:
 | `PGMANAGER_ENCRYPTION_KEY` | server | base64 32-byte at-rest encryption key |
 | `PGMANAGER_BOOTSTRAP_TOKEN` | server | Pre-seed initial admin token (skip auto-generation) |
 | `PGMANAGER_DATA_DIR` | server | Where `bootstrap-token.txt` is written |
+| `PGMANAGER_BACKUP_ENABLED` | server | Turn on per-database backups to S3-compatible storage (default off) |
+| `PGMANAGER_BACKUP_BUCKET` + `_ACCESS_KEY_ID` + `_SECRET_ACCESS_KEY` (or `_SECRET_ACCESS_KEY_FILE`) | server | Where backups go and how to authenticate; `_ENDPOINT`/`_REGION`/`_PREFIX`/`_SCHEDULE`/`_RETENTION` tune the rest — full field list in the server skill |
 
 Full reference in the agent skill ([`.claude/skills/pgmanager/SKILL.md`](.claude/skills/pgmanager/SKILL.md) for client, [`.claude/skills/pgmanager-server/SKILL.md`](.claude/skills/pgmanager-server/SKILL.md) for VPS operations).
 
@@ -326,6 +334,17 @@ curl -sS -H "Authorization: Bearer $TOKEN" $API/api/auth/whoami | jq
 curl -sS -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"env":"pr","pr_number":42}' \
   $API/api/projects/myapp/databases | jq
+
+# Backups — never for `env=pr`; 503 while backup: isn't configured server-side.
+curl -sS -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"enabled":true}' \
+  $API/api/projects/myapp/databases/prod/backup      # toggle the schedule
+
+curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
+  $API/api/projects/myapp/databases/prod/backups | jq   # back up now
+
+curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
+  $API/api/projects/myapp/databases/prod/backups/7/restore | jq   # restore into a new database
 ```
 
 Full endpoint table + scope requirements in the skill files.
@@ -352,7 +371,7 @@ go build -o pgmanager ./cmd/pgmanager
 Or with Docker:
 
 ```bash
-docker run --rm -v "$(pwd):/app" -w /app golang:1.23-alpine \
+docker run --rm -v "$(pwd):/app" -w /app golang:1.25-alpine \
   sh -c "go test ./..."
 ```
 

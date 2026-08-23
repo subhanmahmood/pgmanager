@@ -86,6 +86,18 @@ export function useTables(project: string, env: string, enabled = true) {
   })
 }
 
+/** A 503 here means backups are not configured on this server — that is a
+ *  steady state for the card to render, not a fetch failure, so callers
+ *  should check `error instanceof ApiError && error.status === 503` rather
+ *  than treating every error the same way. */
+export function useBackups(project: string, env: string, enabled = true) {
+  return useQuery({
+    queryKey: keys.backups(project, env),
+    queryFn: () => api.listBackups(project, env),
+    enabled: enabled && Boolean(project && env),
+  })
+}
+
 /* ------------------------------------------------------------- mutations */
 
 export function useCreateProject() {
@@ -135,6 +147,52 @@ export function useRotatePassword(project: string, env: string) {
       qc.invalidateQueries({ queryKey: keys.database(project, env) })
       qc.invalidateQueries({ queryKey: keys.databases(project) })
       qc.removeQueries({ queryKey: keys.credentials(project, env) })
+    },
+  })
+}
+
+export function useSetBackupsEnabled(project: string, env: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (enabled: boolean) => api.setBackupsEnabled(project, env, enabled),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.database(project, env) })
+      qc.invalidateQueries({ queryKey: keys.databases(project) })
+    },
+  })
+}
+
+export function useCreateBackup(project: string, env: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.createBackup(project, env),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.backups(project, env) })
+      qc.invalidateQueries({ queryKey: keys.database(project, env) })
+    },
+  })
+}
+
+export function useDeleteBackup(project: string, env: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => api.deleteBackup(project, env, id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.backups(project, env) })
+      qc.invalidateQueries({ queryKey: keys.database(project, env) })
+    },
+  })
+}
+
+export function useRestoreBackup(project: string, env: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => api.restoreBackup(project, env, id),
+    onSuccess: () => {
+      // Deliberately not writing the returned secret into the cache.
+      qc.invalidateQueries({ queryKey: keys.backups(project, env) })
+      qc.invalidateQueries({ queryKey: keys.database(project, env) })
+      qc.invalidateQueries({ queryKey: keys.databases(project) })
     },
   })
 }

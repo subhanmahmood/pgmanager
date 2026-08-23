@@ -46,6 +46,18 @@ services:
       PGMANAGER_SOCKET: /run/pgmanager/pgmanager.sock
       # Uncomment to pre-seed the admin token instead of letting it auto-generate:
       # PGMANAGER_BOOTSTRAP_TOKEN: ${PGMANAGER_BOOTSTRAP_TOKEN}
+      # Per-database backups to S3-compatible object storage. Disabled by
+      # default; uncomment and fill in .env to enable. Never dev/staging/prod
+      # only — pr databases are never backed up.
+      # PGMANAGER_BACKUP_ENABLED: "true"
+      # PGMANAGER_BACKUP_ENDPOINT: ${PGMANAGER_BACKUP_ENDPOINT}
+      # PGMANAGER_BACKUP_REGION: ${PGMANAGER_BACKUP_REGION}
+      # PGMANAGER_BACKUP_BUCKET: ${PGMANAGER_BACKUP_BUCKET}
+      # PGMANAGER_BACKUP_PREFIX: ${PGMANAGER_BACKUP_PREFIX}
+      # PGMANAGER_BACKUP_ACCESS_KEY_ID: ${PGMANAGER_BACKUP_ACCESS_KEY_ID}
+      # PGMANAGER_BACKUP_SECRET_ACCESS_KEY: ${PGMANAGER_BACKUP_SECRET_ACCESS_KEY}
+      # PGMANAGER_BACKUP_SCHEDULE: 24h
+      # PGMANAGER_BACKUP_RETENTION: "7"
     volumes:
       - pgmanager-data:/var/lib/pgmanager
     networks: [internal]

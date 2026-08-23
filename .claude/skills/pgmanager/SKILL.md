@@ -155,6 +155,44 @@ pgmanager db create geoapp dev -x postgis -x pg_trgm -x uuid-ossp
 
 Names accept letters, digits, `_`, `-` (so `uuid-ossp` works) and must start with a letter. The extension's `.so` must be present on the Server's Postgres image — `db create -x foo` will error if it's not. To add extensions that aren't bundled, see the `pgmanager-server` skill → "Server Postgres image & extensions".
 
+### Backups
+
+```bash
+pgmanager db backup <project> <env> [pr-number]           # back up now
+pgmanager db backup <project> <env> --enable               # turn on the scheduled sweep instead
+pgmanager db backup <project> <env> --disable               # turn it back off
+pgmanager db backups <project> <env> [pr-number]            # list snapshots: id, status, size, started, finished
+pgmanager db restore <project> <env> <backup-id>             # restore into a brand-new database
+```
+
+Never available for `env=pr` (400 — PR databases aren't backed up). `--enable`/`--disable` only flip
+the scheduled-sweep flag; they don't themselves run a backup, and are mutually exclusive with each
+other and with the default (run-now) action. `db backup`/`db backups` return 503 if the Server's
+`backup:` config isn't set up — that's an operator task, see the `pgmanager-server` skill.
+
+`db restore` never touches the source database — it always creates a new one,
+`{project}_{env}_restore_{timestamp}` (its own role, its own password), and prints its credentials
+the same way `db create` does. **The env in that output is not the `<env>` you restored — copy it
+verbatim** (it's what every other `db` command needs to reach the restore afterwards):
+
+```bash
+pgmanager db restore myapp prod 7 --json > restored.json
+jq -r .env restored.json                       # e.g. "prod_restore_20260823T101500"
+pgmanager db credentials myapp "$(jq -r .env restored.json)"
+pgmanager db delete myapp "$(jq -r .env restored.json)"     # when you're done with it
+```
+
+Extensions come across with the data: the Server installs whatever the snapshot's archive names
+(`postgis`, `pg_trgm`, ...) into the new database before restoring into it, because Postgres lets
+only a superuser create most extensions while the restore itself runs as the new database's own
+role. A restored database is not itself backed up — the backup routes reject its
+`{env}_restore_{timestamp}` address, and the admin UI hides the Backups card for it. Back up the
+source database instead.
+
+Restored databases never expire and are never PR databases, so `pgmanager cleanup` never touches
+them — delete them explicitly when you're done. `db list` shows a restored row's `env` as that same
+addressable segment, and a `restored_from` field naming the backup it came from.
+
 ### Tokens
 
 ```bash
@@ -434,9 +472,18 @@ Base: `<api_url>/api`. All endpoints except `/api/health` require `Authorization
 | GET    | `/projects/{name}/databases/{env}` | as above, no password in response |
 | GET    | `/projects/{name}/databases/{env}/credentials` | as above, with password |
 | DELETE | `/projects/{name}/databases/{env}` | as above |
+| PUT    | `/projects/{name}/databases/{env}/backup` | as above; 400 if `env` is `pr`; 503 if backups aren't configured |
+| POST   | `/projects/{name}/databases/{env}/backups` | as above; same 400/503 |
+| GET    | `/projects/{name}/databases/{env}/backups` | as above; same 400/503 |
+| DELETE | `/projects/{name}/databases/{env}/backups/{id}` | as above; 404 if `{id}` doesn't belong to this database |
+| POST   | `/projects/{name}/databases/{env}/backups/{id}/restore` | as above; 400 if the backup hasn't `succeeded` yet |
 | POST   | `/cleanup` | `project:*` or `admin` |
 
 PR databases use `env` path segment `pr_<number>` (e.g., `/projects/myapp/databases/pr_42`).
+Backups never exist for PR databases — all five backup routes 400 on `env=pr`. A restored
+database is reached by putting its full addressable segment in `{env}` on the *non*-backup routes
+above, e.g. `GET /projects/myapp/databases/prod_restore_20260823T101500/credentials` — the token's
+scope is checked against the *source* env (`prod`), not the literal segment.
 
 ### Bodies
 
@@ -455,6 +502,17 @@ PR databases use `env` path segment `pr_<number>` (e.g., `/projects/myapp/databa
 
 // POST /cleanup
 { "older_than": "7d" }
+
+// PUT /projects/myapp/databases/prod/backup
+{ "enabled": true }
+
+// Responses from POST/GET .../backups (BackupResponse):
+// { "id": 7, "database_name": "myapp_prod", "object_key": "pgmanager/myapp/myapp_prod/....dump",
+//   "size_bytes": 1048576, "status": "succeeded", "started_at": "...", "finished_at": "..." }
+
+// POST .../backups/{id}/restore returns the same shape as POST .../databases
+// (project/env/database_name/user_name/password/host/port/connection_string/created_at),
+// but env is "{source-env}_restore_{timestamp}", not the env you posted to.
 ```
 
 ### Direct curl examples
@@ -471,6 +529,12 @@ curl -sS -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application
 
 curl -sS -H "Authorization: Bearer $TOKEN" \
   $API/api/projects/myapp/databases/pr_42/credentials | jq -r .connection_string
+
+curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
+  $API/api/projects/myapp/databases/prod/backups | jq          # back up now
+
+curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
+  $API/api/projects/myapp/databases/prod/backups/7/restore | jq   # restore into a new database
 ```
 
 ---
@@ -580,6 +644,9 @@ Start with `pgmanager doctor` — it prints active profile, mode, whether the to
 | TUI shows empty password | List endpoints strip passwords by design | Press `p` to reveal (calls `db credentials`) |
 | CI re-run fails on `db create` | DB already exists from first run | Use the get-or-create pattern in Use Case 5 |
 | `db create -x foo` fails: `extension "foo" is not available` | The Server's Postgres image doesn't ship that extension's `.so` | Operator task — see `pgmanager-server` skill → "Server Postgres image & extensions" |
+| `db backup`/`db backups`/`db restore` fails: `backups are not configured on this server` (503) | The Server's `backup:` block isn't set, or failed validation at startup | Operator task — see `pgmanager-server` skill → backup config / failed-backup runbook |
+| `db backup <project> pr ...` fails: `backups are not available for PR databases` (400) | Backups don't exist for `pr` databases, by design | Not a bug — back up the source env instead, if there is one |
+| `db restore` fails: `backup has not completed successfully` (400) | The chosen backup is still `running` or ended `failed` | `pgmanager db backups <project> <env>` to find one with `status: succeeded` |
 
 For Server-side troubles (won't start, `encryption key required`, ghcr pull denied, image swap), see the `pgmanager-server` skill.
 

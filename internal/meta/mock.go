@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -17,12 +18,14 @@ type MockStore struct {
 	devices   map[int64]*DeviceRequest
 	users     map[int64]*User
 	sessions  map[int64]*Session
+	backups   map[int64]*Backup
 	nextPID   int64
 	nextDBID  int64
 	nextTID   int64
 	nextDevID int64
 	nextUID   int64
 	nextSID   int64
+	nextBID   int64
 }
 
 // NewMockStore creates a new mock store for testing.
@@ -34,12 +37,14 @@ func NewMockStore() *MockStore {
 		devices:   make(map[int64]*DeviceRequest),
 		users:     make(map[int64]*User),
 		sessions:  make(map[int64]*Session),
+		backups:   make(map[int64]*Backup),
 		nextPID:   1,
 		nextDBID:  1,
 		nextTID:   1,
 		nextDevID: 1,
 		nextUID:   1,
 		nextSID:   1,
+		nextBID:   1,
 	}
 }
 
@@ -131,6 +136,12 @@ func (s *MockStore) GetDatabase(ctx context.Context, projectID int64, env string
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, db := range s.databases {
+		// Restored databases carry the source env, so they would make this
+		// lookup ambiguous. They are addressed by database name instead;
+		// mirrors the `restored_from IS NULL` filter in PostgresStore.
+		if db.RestoredFrom != nil {
+			continue
+		}
 		if db.ProjectID == projectID && db.Env == env {
 			if prNumber == nil && db.PRNumber == nil {
 				return db, nil
@@ -606,4 +617,122 @@ func (s *MockStore) DeleteExpiredSessions(ctx context.Context) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+// --- Backup operations -------------------------------------------------------
+
+func (s *MockStore) SetBackupsEnabled(ctx context.Context, dbName string, enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, db := range s.databases {
+		if db.Name == dbName {
+			db.BackupsEnabled = enabled
+			return nil
+		}
+	}
+	return fmt.Errorf("database not found: %s", dbName)
+}
+
+func (s *MockStore) ListBackupEnabledDatabases(ctx context.Context) ([]Database, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var result []Database
+	for _, db := range s.databases {
+		if db.BackupsEnabled && db.RestoredFrom == nil {
+			result = append(result, *db)
+		}
+	}
+	return result, nil
+}
+
+func (s *MockStore) CreateBackup(ctx context.Context, databaseID int64, key string) (*Backup, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := &Backup{
+		ID:         s.nextBID,
+		DatabaseID: databaseID,
+		Key:        key,
+		Status:     BackupStatusRunning,
+		StartedAt:  time.Now(),
+	}
+	s.backups[b.ID] = b
+	s.nextBID++
+	out := *b
+	return &out, nil
+}
+
+func (s *MockStore) FinishBackup(ctx context.Context, id int64, size int64, status, errMsg string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.backups[id]
+	if !ok {
+		return fmt.Errorf("backup not found: %d", id)
+	}
+	b.SizeBytes = size
+	b.Status = status
+	b.Error = errMsg
+	now := time.Now()
+	b.FinishedAt = &now
+	return nil
+}
+
+func (s *MockStore) GetBackup(ctx context.Context, id int64) (*Backup, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	b, ok := s.backups[id]
+	if !ok {
+		return nil, nil
+	}
+	out := *b
+	return &out, nil
+}
+
+func (s *MockStore) ListBackups(ctx context.Context, databaseID int64) ([]Backup, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var result []Backup
+	for _, b := range s.backups {
+		if b.DatabaseID == databaseID {
+			result = append(result, *b)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if !result[i].StartedAt.Equal(result[j].StartedAt) {
+			return result[i].StartedAt.After(result[j].StartedAt)
+		}
+		return result[i].ID > result[j].ID
+	})
+	return result, nil
+}
+
+func (s *MockStore) DeleteBackup(ctx context.Context, id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.backups[id]; !ok {
+		return fmt.Errorf("backup not found: %d", id)
+	}
+	delete(s.backups, id)
+	return nil
+}
+
+// CreateRestoredDatabase inserts a database row for a freshly restored
+// database, recording the backup it came from. It never touches the source
+// database or its backup rows.
+func (s *MockStore) CreateRestoredDatabase(ctx context.Context, projectID, backupID int64, name, userName, password, env string) (*Database, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bid := backupID
+	db := &Database{
+		ID:           s.nextDBID,
+		ProjectID:    projectID,
+		Name:         name,
+		UserName:     userName,
+		Password:     password,
+		Env:          env,
+		CreatedAt:    time.Now(),
+		RestoredFrom: &bid,
+	}
+	s.databases[db.ID] = db
+	s.nextDBID++
+	return db, nil
 }
