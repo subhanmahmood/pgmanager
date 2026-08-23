@@ -71,6 +71,9 @@ type DatabaseInfo struct {
 	ConnString   string
 	CreatedAt    time.Time
 	ExpiresAt    *time.Time
+	// RestoredFrom holds the source backup's ID when this database was
+	// created by a restore, and is nil otherwise.
+	RestoredFrom *int64
 }
 
 // NewManager creates a new project manager
@@ -268,32 +271,50 @@ func (m *Manager) CreateDatabase(ctx context.Context, projectName, env string, p
 	}, nil
 }
 
-// GetDatabase returns information about a database
-func (m *Manager) GetDatabase(ctx context.Context, projectName, env string, prNumber *int) (*DatabaseInfo, error) {
-	if err := ValidateEnv(env); err != nil {
-		return nil, err
-	}
-
-	// Get project
+// resolveDatabase finds the database a path segment names. It tries the
+// database name first, which is how a restored database is addressed, and
+// falls back to the (project, env, pr) lookup. GetDatabase filters out
+// restored rows, so the two paths can never disagree: for a non-restored
+// database the name probe finds the exact same row the fallback would.
+func (m *Manager) resolveDatabase(ctx context.Context, projectName, segment string, prNumber *int) (*meta.Project, *meta.Database, error) {
 	project, err := m.store.GetProject(ctx, projectName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get project: %w", err)
+		return nil, nil, fmt.Errorf("failed to get project: %w", err)
 	}
 	if project == nil {
-		return nil, fmt.Errorf("project '%s' not found", projectName)
+		return nil, nil, fmt.Errorf("project '%s' not found", projectName)
 	}
 
-	// Get database
-	dbRecord, err := m.store.GetDatabase(ctx, project.ID, env, prNumber)
+	if rec, err := m.store.GetDatabaseByName(ctx, projectName+"_"+segment); err != nil {
+		return nil, nil, fmt.Errorf("failed to get database: %w", err)
+	} else if rec != nil && rec.ProjectID == project.ID {
+		return project, rec, nil
+	}
+
+	if err := ValidateEnv(segment); err != nil {
+		return nil, nil, err
+	}
+
+	dbRecord, err := m.store.GetDatabase(ctx, project.ID, segment, prNumber)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get database: %w", err)
+		return nil, nil, fmt.Errorf("failed to get database: %w", err)
 	}
 	if dbRecord == nil {
-		envStr := env
+		envStr := segment
 		if prNumber != nil {
 			envStr = fmt.Sprintf("pr_%d", *prNumber)
 		}
-		return nil, fmt.Errorf("database not found for %s/%s", projectName, envStr)
+		return nil, nil, fmt.Errorf("database not found for %s/%s", projectName, envStr)
+	}
+
+	return project, dbRecord, nil
+}
+
+// GetDatabase returns information about a database
+func (m *Manager) GetDatabase(ctx context.Context, projectName, env string, prNumber *int) (*DatabaseInfo, error) {
+	_, dbRecord, err := m.resolveDatabase(ctx, projectName, env, prNumber)
+	if err != nil {
+		return nil, err
 	}
 
 	host := m.cfg.Postgres.EffectiveHost()
@@ -310,6 +331,7 @@ func (m *Manager) GetDatabase(ctx context.Context, projectName, env string, prNu
 		ConnString:   db.ConnectionString(host, port, dbRecord.Name, dbRecord.UserName, dbRecord.Password, m.cfg.Postgres.SSLMode),
 		CreatedAt:    dbRecord.CreatedAt,
 		ExpiresAt:    dbRecord.ExpiresAt,
+		RestoredFrom: dbRecord.RestoredFrom,
 	}, nil
 }
 
@@ -352,9 +374,21 @@ func (m *Manager) ListDatabases(ctx context.Context, projectName string) ([]Data
 			projectNameStr = projectCache[dbItem.ProjectID]
 		}
 
+		// A restored database's metadata row stores the *source* env
+		// ("dev"), not the addressable path segment — the row is reached at
+		// "{source.Env}_restore_{ts}" (see RestoreBackup), which is exactly
+		// the database name with the "{project}_" prefix stripped. Compute
+		// that here so Env always matches what GetDatabase expects as its
+		// segment argument, the same convention every other DatabaseInfo
+		// already follows.
+		env := dbItem.Env
+		if dbItem.RestoredFrom != nil {
+			env = strings.TrimPrefix(dbItem.Name, projectNameStr+"_")
+		}
+
 		result = append(result, DatabaseInfo{
 			Project:      projectNameStr,
-			Env:          dbItem.Env,
+			Env:          env,
 			PRNumber:     dbItem.PRNumber,
 			DatabaseName: dbItem.Name,
 			UserName:     dbItem.UserName,
@@ -364,6 +398,7 @@ func (m *Manager) ListDatabases(ctx context.Context, projectName string) ([]Data
 			ConnString:   db.ConnectionString(host, port, dbItem.Name, dbItem.UserName, dbItem.Password, m.cfg.Postgres.SSLMode),
 			CreatedAt:    dbItem.CreatedAt,
 			ExpiresAt:    dbItem.ExpiresAt,
+			RestoredFrom: dbItem.RestoredFrom,
 		})
 	}
 
@@ -375,28 +410,9 @@ func (m *Manager) ListDatabases(ctx context.Context, projectName string) ([]Data
 // password. If terminate is true, existing backends on the database are killed
 // so clients still holding the old credential are forced to reconnect.
 func (m *Manager) RotatePassword(ctx context.Context, projectName, env string, prNumber *int, terminate bool) (*DatabaseInfo, error) {
-	if err := ValidateEnv(env); err != nil {
+	_, dbRecord, err := m.resolveDatabase(ctx, projectName, env, prNumber)
+	if err != nil {
 		return nil, err
-	}
-
-	project, err := m.store.GetProject(ctx, projectName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get project: %w", err)
-	}
-	if project == nil {
-		return nil, fmt.Errorf("project '%s' not found", projectName)
-	}
-
-	dbRecord, err := m.store.GetDatabase(ctx, project.ID, env, prNumber)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get database: %w", err)
-	}
-	if dbRecord == nil {
-		envStr := env
-		if prNumber != nil {
-			envStr = fmt.Sprintf("pr_%d", *prNumber)
-		}
-		return nil, fmt.Errorf("database not found for %s/%s", projectName, envStr)
 	}
 
 	password := db.GeneratePassword()
@@ -432,31 +448,15 @@ func (m *Manager) RotatePassword(ctx context.Context, projectName, env string, p
 		ConnString:   db.ConnectionString(host, port, dbRecord.Name, dbRecord.UserName, password, m.cfg.Postgres.SSLMode),
 		CreatedAt:    dbRecord.CreatedAt,
 		ExpiresAt:    dbRecord.ExpiresAt,
+		RestoredFrom: dbRecord.RestoredFrom,
 	}, nil
 }
 
 // DeleteDatabase deletes a database
 func (m *Manager) DeleteDatabase(ctx context.Context, projectName, env string, prNumber *int) error {
-	if err := ValidateEnv(env); err != nil {
+	_, dbRecord, err := m.resolveDatabase(ctx, projectName, env, prNumber)
+	if err != nil {
 		return err
-	}
-
-	// Get project
-	project, err := m.store.GetProject(ctx, projectName)
-	if err != nil {
-		return fmt.Errorf("failed to get project: %w", err)
-	}
-	if project == nil {
-		return fmt.Errorf("project '%s' not found", projectName)
-	}
-
-	// Get database
-	dbRecord, err := m.store.GetDatabase(ctx, project.ID, env, prNumber)
-	if err != nil {
-		return fmt.Errorf("failed to get database: %w", err)
-	}
-	if dbRecord == nil {
-		return fmt.Errorf("database not found")
 	}
 
 	// Drop from PostgreSQL

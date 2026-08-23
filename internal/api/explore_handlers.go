@@ -25,7 +25,7 @@ func databaseTarget(w http.ResponseWriter, r *http.Request) (projectName, env st
 		writeError(w, http.StatusBadRequest, err.Error())
 		return "", "", nil, false
 	}
-	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: env}
+	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: scopeEnv(env)}
 	if prNumber != nil {
 		scopeReq.PR = *prNumber
 	}

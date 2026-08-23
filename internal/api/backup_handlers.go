@@ -66,6 +66,10 @@ func writeBackupError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, project.ErrBackupsNotForPR):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, project.ErrBackupNotFound):
+		writeError(w, http.StatusNotFound, "backup not found")
+	case errors.Is(err, project.ErrBackupNotRestorable):
+		writeError(w, http.StatusBadRequest, err.Error())
 	default:
 		writeError(w, http.StatusNotFound, "not found")
 	}
@@ -149,4 +153,39 @@ func (s *Server) deleteBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// restoreBackup creates a brand-new database from a snapshot and returns its
+// credentials, the same shape as createDatabase. The source database named
+// by {name}/{env} is never opened; only the snapshot object is read.
+func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) {
+	projectName, env, prNumber, ok := databaseTarget(w, r)
+	if !ok {
+		return
+	}
+
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid backup id")
+		return
+	}
+
+	info, err := s.mgr.RestoreBackup(r.Context(), projectName, env, prNumber, id)
+	if err != nil {
+		writeBackupError(w, err)
+		return
+	}
+
+	host, port, connStr := s.withPublicHost(r, info.DatabaseName, info.UserName, info.Password)
+	writeJSON(w, http.StatusCreated, DatabaseResponse{
+		Project:      info.Project,
+		Env:          info.Env,
+		DatabaseName: info.DatabaseName,
+		UserName:     info.UserName,
+		Password:     info.Password,
+		Host:         host,
+		Port:         port,
+		ConnString:   connStr,
+		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
+	})
 }

@@ -1,7 +1,13 @@
 package project
 
 import (
+	"context"
+	"strings"
 	"testing"
+	"time"
+
+	"pgmanager/internal/config"
+	"pgmanager/internal/meta"
 )
 
 func TestValidateName(t *testing.T) {
@@ -176,4 +182,148 @@ func TestParseEnv(t *testing.T) {
 
 func intPtr(i int) *int {
 	return &i
+}
+
+// TestRestoreDatabaseNameFormat pins the exact name/user/env-segment shape a
+// restore produces, since chunk 6's client and the admin UI's restore dialog
+// will need to reconstruct or display these.
+func TestRestoreDatabaseNameFormat(t *testing.T) {
+	ts := time.Date(2026, 8, 23, 10, 15, 0, 0, time.UTC)
+
+	dbName, userName, envSegment, err := restoreDatabaseName("myapp", "dev", ts)
+	if err != nil {
+		t.Fatalf("restoreDatabaseName() error = %v", err)
+	}
+	if want := "myapp_dev_restore_20260823T101500"; dbName != want {
+		t.Errorf("dbName = %q, want %q", dbName, want)
+	}
+	if want := "myapp_dev_restore_20260823T101500_user"; userName != want {
+		t.Errorf("userName = %q, want %q", userName, want)
+	}
+	if want := "dev_restore_20260823T101500"; envSegment != want {
+		t.Errorf("envSegment = %q, want %q", envSegment, want)
+	}
+	// The env segment is exactly the database name with the project prefix
+	// stripped — that's the invariant ListDatabases and RestoreBackup both
+	// rely on for a restored row.
+	if got := dbName; got != "myapp_"+envSegment {
+		t.Errorf("dbName %q is not \"myapp_\"+envSegment (%q)", got, envSegment)
+	}
+}
+
+// TestRestoreDatabaseNameNonUTCInput proves the timestamp is normalized to
+// UTC before formatting, so two restores of the same instant from different
+// server-local-time inputs never produce different identifiers.
+func TestRestoreDatabaseNameNonUTCInput(t *testing.T) {
+	loc := time.FixedZone("UTC-5", -5*60*60)
+	ts := time.Date(2026, 8, 23, 5, 15, 0, 0, loc) // 10:15 UTC
+
+	_, _, envSegment, err := restoreDatabaseName("myapp", "dev", ts)
+	if err != nil {
+		t.Fatalf("restoreDatabaseName() error = %v", err)
+	}
+	if want := "dev_restore_20260823T101500"; envSegment != want {
+		t.Errorf("envSegment = %q, want %q (non-UTC input not normalized)", envSegment, want)
+	}
+}
+
+// TestRestoreDatabaseNameIdentifierLimit is the 63-byte guard the plan calls
+// out by name: a project name of 26 characters always fits (even with the
+// longest env, "staging"), and 27 characters always overflows. Postgres
+// silently truncates identifiers past its limit, which would risk two
+// different restores colliding on one role name — this must be a hard
+// error, never a silent truncation.
+func TestRestoreDatabaseNameIdentifierLimit(t *testing.T) {
+	ts := time.Date(2026, 8, 23, 10, 15, 0, 0, time.UTC)
+
+	fits := strings.Repeat("a", 26)
+	if _, userName, _, err := restoreDatabaseName(fits, "staging", ts); err != nil {
+		t.Errorf("26-char project name: unexpected error: %v", err)
+	} else if len(userName) != maxIdentifierBytes {
+		t.Errorf("26-char project name: userName length = %d, want exactly %d", len(userName), maxIdentifierBytes)
+	}
+
+	overflows := strings.Repeat("a", 27)
+	if _, _, _, err := restoreDatabaseName(overflows, "staging", ts); err == nil {
+		t.Errorf("27-char project name: expected an error, got none")
+	}
+}
+
+// newRestoreTestManager builds a Manager backed by a MockStore, with one
+// project and one non-restored database ready to resolve.
+func newRestoreTestManager(t *testing.T) (mgr *Manager, store *meta.MockStore, projectID, dbID int64) {
+	t.Helper()
+
+	cfg := &config.Config{
+		Postgres: config.PostgresConfig{
+			Host: "localhost", Port: 5432, User: "postgres", Password: "x", Database: "postgres",
+		},
+	}
+	store = meta.NewMockStore()
+	mgr = NewManager(cfg, store)
+
+	ctx := context.Background()
+	p, err := store.CreateProject(ctx, "acme")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	dbRecord, err := store.CreateDatabase(ctx, p.ID, "acme_dev", "acme_dev_user", "pw", "dev", nil, nil)
+	if err != nil {
+		t.Fatalf("create database: %v", err)
+	}
+	return mgr, store, p.ID, dbRecord.ID
+}
+
+// TestResolveDatabasePrefersNameMatch proves resolveDatabase finds a
+// restored database by name — the only way it's reachable, since
+// meta.Store.GetDatabase filters restored rows out — and that an ordinary
+// "dev" lookup still returns the original database once a restore of it
+// exists. The two paths sharing one implementation must never disagree
+// about which row a segment names.
+func TestResolveDatabasePrefersNameMatch(t *testing.T) {
+	mgr, store, projectID, dbID := newRestoreTestManager(t)
+	ctx := context.Background()
+
+	// Plain lookup finds the original database before any restore exists.
+	_, rec, err := mgr.resolveDatabase(ctx, "acme", "dev", nil)
+	if err != nil {
+		t.Fatalf("resolveDatabase(dev) before restore: %v", err)
+	}
+	if rec.Name != "acme_dev" {
+		t.Fatalf("resolveDatabase(dev) before restore: got %q, want acme_dev", rec.Name)
+	}
+
+	// Create a restored row the same way RestoreBackup does: a succeeded
+	// backup of acme_dev, then CreateRestoredDatabase.
+	b, err := store.CreateBackup(ctx, dbID, "pgmanager/acme/acme_dev/20260823T101500Z.dump")
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+	if err := store.FinishBackup(ctx, b.ID, 1024, meta.BackupStatusSucceeded, ""); err != nil {
+		t.Fatalf("finish backup: %v", err)
+	}
+	restoredName := "acme_dev_restore_20260823T101500"
+	restored, err := store.CreateRestoredDatabase(ctx, projectID, b.ID, restoredName, restoredName+"_user", "pw2", "dev")
+	if err != nil {
+		t.Fatalf("create restored database: %v", err)
+	}
+
+	// The restored database is reachable only by its full name segment.
+	_, rec, err = mgr.resolveDatabase(ctx, "acme", "dev_restore_20260823T101500", nil)
+	if err != nil {
+		t.Fatalf("resolveDatabase(dev_restore_...): %v", err)
+	}
+	if rec.ID != restored.ID {
+		t.Errorf("resolveDatabase(dev_restore_...) = database %d (%s), want %d (%s)", rec.ID, rec.Name, restored.ID, restored.Name)
+	}
+
+	// A plain "dev" lookup still returns the original — never the restore —
+	// even though a restored row with a matching source env now exists.
+	_, rec, err = mgr.resolveDatabase(ctx, "acme", "dev", nil)
+	if err != nil {
+		t.Fatalf("resolveDatabase(dev) after restore: %v", err)
+	}
+	if rec.Name != "acme_dev" {
+		t.Errorf("resolveDatabase(dev) after restore: got %q, want acme_dev (must not return the restored row)", rec.Name)
+	}
 }

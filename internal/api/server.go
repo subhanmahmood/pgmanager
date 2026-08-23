@@ -136,6 +136,7 @@ func (s *Server) buildRouter(authMW func(http.Handler) http.Handler) *chi.Mux {
 		r.Post("/projects/{name}/databases/{env}/backups", s.createBackup)
 		r.Get("/projects/{name}/databases/{env}/backups", s.listBackups)
 		r.Delete("/projects/{name}/databases/{env}/backups/{id}", s.deleteBackup)
+		r.Post("/projects/{name}/databases/{env}/backups/{id}/restore", s.restoreBackup)
 
 		r.Post("/cleanup", s.cleanup)
 	})

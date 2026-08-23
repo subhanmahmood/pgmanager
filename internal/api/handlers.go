@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -58,6 +59,9 @@ type DatabaseInfoResponse struct {
 	Port         int     `json:"port"`
 	CreatedAt    string  `json:"created_at"`
 	ExpiresAt    *string `json:"expires_at,omitempty"`
+	// RestoredFrom holds the source backup's ID when this database was
+	// created by a restore, and is omitted otherwise.
+	RestoredFrom *int64 `json:"restored_from,omitempty"`
 }
 
 type CreateProjectRequest struct {
@@ -216,6 +220,7 @@ func (s *Server) listDatabases(w http.ResponseWriter, r *http.Request) {
 			Port:         port,
 			CreatedAt:    info.CreatedAt.Format(time.RFC3339),
 			ExpiresAt:    expiresAt,
+			RestoredFrom: info.RestoredFrom,
 		}
 	}
 	writeJSON(w, http.StatusOK, response)
@@ -286,7 +291,7 @@ func (s *Server) getDatabase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: env}
+	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: scopeEnv(env)}
 	if prNumber != nil {
 		scopeReq.PR = *prNumber
 	}
@@ -316,6 +321,7 @@ func (s *Server) getDatabase(w http.ResponseWriter, r *http.Request) {
 		Port:         port,
 		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
 		ExpiresAt:    expiresAt,
+		RestoredFrom: info.RestoredFrom,
 	})
 }
 
@@ -330,7 +336,7 @@ func (s *Server) getDatabaseCredentials(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: env}
+	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: scopeEnv(env)}
 	if prNumber != nil {
 		scopeReq.PR = *prNumber
 	}
@@ -422,7 +428,7 @@ func (s *Server) deleteDatabase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: env}
+	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: scopeEnv(env)}
 	if prNumber != nil {
 		scopeReq.PR = *prNumber
 	}
@@ -529,6 +535,22 @@ func parseEnvParam(env string) (*int, string, error) {
 		return &num, "pr", nil
 	}
 	return nil, env, nil
+}
+
+// restoreSegmentRe matches the env path segment of a restored database, e.g.
+// "dev_restore_20260823T101500".
+var restoreSegmentRe = regexp.MustCompile(`^(prod|dev|staging)_restore_\d{8}T\d{6}$`)
+
+// scopeEnv returns the environment a path segment is authorized as. A
+// restored database holds the data of the environment it came from, so it is
+// governed by that environment's scope — a token scoped to "dev" must never
+// be able to reach "prod_restore_<ts>", which holds production data. Any
+// segment that isn't a restore segment is returned unchanged.
+func scopeEnv(segment string) string {
+	if m := restoreSegmentRe.FindStringSubmatch(segment); m != nil {
+		return m[1]
+	}
+	return segment
 }
 
 // parseDuration parses a duration string like "7d", "24h", "1w".
