@@ -15,6 +15,7 @@ import { EnvBadge } from '@/components/env-badge'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { SecretDialog } from '@/components/secret-dialog'
 import { RotateDialog, RotateTrigger } from '@/components/rotate-dialog'
+import { BackupsCard } from '@/components/backups-card'
 import { CopyField, CopyInline } from '@/components/copy-field'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -269,6 +270,10 @@ export function DatabaseDetailPage() {
               )}
             </CardContent>
           </Card>
+
+          {/* Backups don't exist for pr databases — they're throwaway by
+              design, and the server rejects every backup route for env=pr. */}
+          {db.env !== 'pr' && <BackupsCard db={db} />}
         </div>
 
         <div className="lg:col-span-1">

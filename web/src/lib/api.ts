@@ -1,5 +1,6 @@
 import type {
   ApproveDeviceRequest,
+  Backup,
   CleanupResult,
   CreateDatabaseRequest,
   CreateTokenRequest,
@@ -109,6 +110,23 @@ export const api = {
     }),
   deleteDatabase: (project: string, env: string) =>
     request<null>('DELETE', `/projects/${seg(project)}/databases/${seg(env)}`),
+
+  setBackupsEnabled: (project: string, env: string, enabled: boolean) =>
+    request<null>('PUT', `/projects/${seg(project)}/databases/${seg(env)}/backup`, { enabled }),
+  listBackups: (project: string, env: string) =>
+    request<Backup[]>('GET', `/projects/${seg(project)}/databases/${seg(env)}/backups`),
+  createBackup: (project: string, env: string) =>
+    request<Backup>('POST', `/projects/${seg(project)}/databases/${seg(env)}/backups`),
+  deleteBackup: (project: string, env: string, id: number) =>
+    request<null>(
+      'DELETE',
+      `/projects/${seg(project)}/databases/${seg(env)}/backups/${seg(String(id))}`,
+    ),
+  restoreBackup: (project: string, env: string, id: number) =>
+    request<DatabaseSecret>(
+      'POST',
+      `/projects/${seg(project)}/databases/${seg(env)}/backups/${seg(String(id))}/restore`,
+    ),
 
   listTables: (project: string, env: string) =>
     request<{ tables: TableRef[] | null }>(

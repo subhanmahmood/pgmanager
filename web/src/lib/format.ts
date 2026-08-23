@@ -13,6 +13,20 @@ export function parseEnvSegment(segment: string): { env: string; prNumber?: numb
   return { env: segment }
 }
 
+/** Human-readable byte size, matching cmd/pgmanager's humanBytes (KiB/MiB/... at 1024). */
+export function fmtBytes(n: number): string {
+  const unit = 1024
+  if (!Number.isFinite(n) || n < unit) return `${n} B`
+  const units = 'KMGTPE'
+  let div = unit
+  let exp = 0
+  for (let m = n / unit; m >= unit; m /= unit) {
+    div *= unit
+    exp++
+  }
+  return `${(n / div).toFixed(1)} ${units[exp]}iB`
+}
+
 export function fmtDate(s?: string | null): string {
   if (!s) return '—'
   const d = new Date(s)

@@ -91,6 +91,7 @@ export const keys = {
   database: (project: string, env: string) => ['database', project, env] as const,
   credentials: (project: string, env: string) => ['credentials', project, env] as const,
   tables: (project: string, env: string) => ['tables', project, env] as const,
+  backups: (project: string, env: string) => ['backups', project, env] as const,
   rows: (project: string, env: string, schema: string, table: string, limit: number, offset: number) =>
     ['rows', project, env, schema, table, limit, offset] as const,
   tokens: ['tokens'] as const,

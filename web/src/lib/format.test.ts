@@ -3,6 +3,7 @@ import {
   cellText,
   envSegment,
   expiringSoon,
+  fmtBytes,
   inputValue,
   isExpired,
   parseEnvSegment,
@@ -115,6 +116,22 @@ describe('primaryKeyColumns', () => {
         { name: 'id', primary_key: true },
       ]),
     ).toEqual(['tenant', 'id'])
+  })
+})
+
+describe('fmtBytes', () => {
+  // Mirrors cmd/pgmanager's humanBytes — same base unit, same rounding — so
+  // a size shown in the CLI and the admin UI never disagree.
+  it('keeps sub-KiB sizes as whole bytes', () => {
+    expect(fmtBytes(0)).toBe('0 B')
+    expect(fmtBytes(1023)).toBe('1023 B')
+  })
+
+  it('renders larger sizes with one decimal and the right unit', () => {
+    expect(fmtBytes(1024)).toBe('1.0 KiB')
+    expect(fmtBytes(1536)).toBe('1.5 KiB')
+    expect(fmtBytes(5 * 1024 * 1024)).toBe('5.0 MiB')
+    expect(fmtBytes(2 * 1024 * 1024 * 1024)).toBe('2.0 GiB')
   })
 })
 
