@@ -21,3 +21,21 @@ api:
 # Cleanup settings
 cleanup:
   default_ttl: 168h  # 7 days for PR databases
+
+# Per-database backups to S3-compatible object storage (dev/staging/prod only,
+# never pr). Disabled by default. Override with: PGMANAGER_BACKUP_ENABLED,
+# PGMANAGER_BACKUP_ENDPOINT, PGMANAGER_BACKUP_REGION, PGMANAGER_BACKUP_BUCKET,
+# PGMANAGER_BACKUP_PREFIX, PGMANAGER_BACKUP_ACCESS_KEY_ID,
+# PGMANAGER_BACKUP_SECRET_ACCESS_KEY[_FILE], PGMANAGER_BACKUP_SCHEDULE,
+# PGMANAGER_BACKUP_RETENTION
+# backup:
+#   enabled: false
+#   endpoint: ""       # empty = AWS S3; set for R2/B2/MinIO
+#   region: ""
+#   bucket: ""
+#   prefix: ""         # defaults to "pgmanager/"
+#   access_key_id: ""
+#   secret_access_key: ""
+#   secret_access_key_file: ""
+#   schedule: 24h
+#   retention: 7

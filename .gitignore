@@ -17,6 +17,9 @@ data/
 # upgrade.sh --tag leaves a compose backup behind
 examples/deploy/docker-compose.yml.bak
 
+# Per-chunk worktrees created by the ship-issue skill
+.claude/worktrees/
+
 # Admin UI. Source lives in web/src; web/dist is the build output and IS
 # committed, so `go run` serves a UI without a Node toolchain.
 web/node_modules/

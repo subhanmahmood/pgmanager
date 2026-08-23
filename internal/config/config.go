@@ -28,6 +28,7 @@ type Config struct {
 	API      APIConfig      `yaml:"api"`
 	Cleanup  CleanupConfig  `yaml:"cleanup"`
 	Crypto   CryptoConfig   `yaml:"crypto"`
+	Backup   BackupConfig   `yaml:"backup"`
 	DataDir  string         `yaml:"data_dir"`
 }
 
@@ -83,6 +84,23 @@ type CleanupConfig struct {
 type CryptoConfig struct {
 	Key     string `yaml:"key"`      // base64-encoded 32-byte key
 	KeyFile string `yaml:"key_file"` // optional path to a file containing the key
+}
+
+// BackupConfig holds settings for streaming pg_dump output to S3-compatible
+// object storage. SecretAccessKey (and whatever SecretAccessKeyFile
+// resolves to) is a credential: never log it and never let it — or this
+// struct as a whole — reach a JSON response.
+type BackupConfig struct {
+	Enabled             bool          `yaml:"enabled"`
+	Endpoint            string        `yaml:"endpoint"` // empty = AWS S3; set for R2/B2/MinIO
+	Region              string        `yaml:"region"`
+	Bucket              string        `yaml:"bucket"`
+	Prefix              string        `yaml:"prefix"`
+	AccessKeyID         string        `yaml:"access_key_id"`
+	SecretAccessKey     string        `yaml:"secret_access_key"`
+	SecretAccessKeyFile string        `yaml:"secret_access_key_file"`
+	Schedule            time.Duration `yaml:"schedule"`
+	Retention           int           `yaml:"retention"`
 }
 
 // Discover searches for a server config file in standard locations.
@@ -201,6 +219,40 @@ func applyEnvOverrides(cfg *Config) {
 	if dir := os.Getenv("PGMANAGER_DATA_DIR"); dir != "" {
 		cfg.DataDir = dir
 	}
+	if enabled := os.Getenv("PGMANAGER_BACKUP_ENABLED"); enabled != "" {
+		cfg.Backup.Enabled = enabled == "true" || enabled == "1"
+	}
+	if endpoint := os.Getenv("PGMANAGER_BACKUP_ENDPOINT"); endpoint != "" {
+		cfg.Backup.Endpoint = endpoint
+	}
+	if region := os.Getenv("PGMANAGER_BACKUP_REGION"); region != "" {
+		cfg.Backup.Region = region
+	}
+	if bucket := os.Getenv("PGMANAGER_BACKUP_BUCKET"); bucket != "" {
+		cfg.Backup.Bucket = bucket
+	}
+	if prefix := os.Getenv("PGMANAGER_BACKUP_PREFIX"); prefix != "" {
+		cfg.Backup.Prefix = prefix
+	}
+	if keyID := os.Getenv("PGMANAGER_BACKUP_ACCESS_KEY_ID"); keyID != "" {
+		cfg.Backup.AccessKeyID = keyID
+	}
+	if secret := os.Getenv("PGMANAGER_BACKUP_SECRET_ACCESS_KEY"); secret != "" {
+		cfg.Backup.SecretAccessKey = secret
+	}
+	if secretFile := os.Getenv("PGMANAGER_BACKUP_SECRET_ACCESS_KEY_FILE"); secretFile != "" {
+		cfg.Backup.SecretAccessKeyFile = secretFile
+	}
+	if schedule := os.Getenv("PGMANAGER_BACKUP_SCHEDULE"); schedule != "" {
+		if d, err := time.ParseDuration(schedule); err == nil {
+			cfg.Backup.Schedule = d
+		}
+	}
+	if retention := os.Getenv("PGMANAGER_BACKUP_RETENTION"); retention != "" {
+		if r, err := strconv.Atoi(retention); err == nil {
+			cfg.Backup.Retention = r
+		}
+	}
 }
 
 func splitAndTrim(s, sep string) []string {
@@ -231,6 +283,11 @@ func Default() *Config {
 		},
 		Cleanup: CleanupConfig{
 			DefaultTTL: 7 * 24 * time.Hour,
+		},
+		Backup: BackupConfig{
+			Prefix:    "pgmanager/",
+			Schedule:  24 * time.Hour,
+			Retention: 7,
 		},
 		DataDir: "/var/lib/pgmanager",
 	}
@@ -308,4 +365,62 @@ func (c *PostgresConfig) EffectivePort() int {
 		return c.PublicPort
 	}
 	return c.Port
+}
+
+// Secret returns the configured S3 secret access key. Order: inline
+// SecretAccessKey wins, else SecretAccessKeyFile contents (trimmed).
+// Returns "" with no error if neither is configured.
+func (c *BackupConfig) Secret() (string, error) {
+	if c.SecretAccessKey != "" {
+		return c.SecretAccessKey, nil
+	}
+	if c.SecretAccessKeyFile != "" {
+		data, err := os.ReadFile(c.SecretAccessKeyFile)
+		if err != nil {
+			return "", fmt.Errorf("read backup secret access key file: %w", err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+	return "", nil
+}
+
+// EffectivePrefix returns the object-key prefix to use, defaulting to
+// "pgmanager/" and always ending in a single trailing slash.
+func (c *BackupConfig) EffectivePrefix() string {
+	prefix := c.Prefix
+	if prefix == "" {
+		prefix = "pgmanager/"
+	}
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	return prefix
+}
+
+// Validate checks the backup configuration. It only enforces requirements
+// when Enabled is true — a disabled backup config can be left blank.
+func (c *BackupConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.Bucket == "" {
+		return fmt.Errorf("backup.bucket (or PGMANAGER_BACKUP_BUCKET) is required when backup.enabled is true")
+	}
+	if c.AccessKeyID == "" {
+		return fmt.Errorf("backup.access_key_id (or PGMANAGER_BACKUP_ACCESS_KEY_ID) is required when backup.enabled is true")
+	}
+	secret, err := c.Secret()
+	if err != nil {
+		return fmt.Errorf("backup secret: %w", err)
+	}
+	if secret == "" {
+		return fmt.Errorf("backup.secret_access_key or backup.secret_access_key_file (or PGMANAGER_BACKUP_SECRET_ACCESS_KEY[_FILE]) is required when backup.enabled is true")
+	}
+	if c.Retention < 1 {
+		return fmt.Errorf("backup.retention (or PGMANAGER_BACKUP_RETENTION) must be >= 1, got %d", c.Retention)
+	}
+	if c.Schedule < time.Minute {
+		return fmt.Errorf("backup.schedule (or PGMANAGER_BACKUP_SCHEDULE) must be >= 1m, got %s", c.Schedule)
+	}
+	return nil
 }

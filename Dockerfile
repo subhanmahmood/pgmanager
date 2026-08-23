@@ -2,7 +2,7 @@
 # BUILDPLATFORM/TARGETOS/TARGETARCH are provided by buildx for multi-arch builds;
 # pinning the builder to BUILDPLATFORM keeps the toolchain native and uses
 # Go's own cross-compilation (CGO_ENABLED=0, all deps are pure Go).
-FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
@@ -19,9 +19,12 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     -o pgmanager ./cmd/pgmanager
 
 # Final stage
-FROM alpine:3.19
+FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates tzdata
+# postgresql17-client provides pg_dump/pg_restore matching the postgres:17
+# image used in examples/deploy — a mismatched major version fails loudly at
+# runtime rather than silently, but we pin here to avoid that entirely.
+RUN apk add --no-cache ca-certificates tzdata postgresql17-client
 
 COPY --from=builder /app/pgmanager /usr/local/bin/pgmanager
 

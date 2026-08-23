@@ -100,7 +100,7 @@ go build -o pgmanager ./cmd/pgmanager
 ### With Docker (preferred if Go not installed)
 
 ```bash
-docker run --rm -v "$(pwd):/app" -w /app golang:1.23-alpine \
+docker run --rm -v "$(pwd):/app" -w /app golang:1.25-alpine \
   sh -c "apk add --no-cache gcc musl-dev && go test ./..."
 
 docker build -t pgmanager:latest .

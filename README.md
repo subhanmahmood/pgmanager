@@ -352,7 +352,7 @@ go build -o pgmanager ./cmd/pgmanager
 Or with Docker:
 
 ```bash
-docker run --rm -v "$(pwd):/app" -w /app golang:1.23-alpine \
+docker run --rm -v "$(pwd):/app" -w /app golang:1.25-alpine \
   sh -c "go test ./..."
 ```
 
