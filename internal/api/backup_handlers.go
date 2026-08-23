@@ -178,14 +178,15 @@ func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) {
 
 	host, port, connStr := s.withPublicHost(r, info.DatabaseName, info.UserName, info.Password)
 	writeJSON(w, http.StatusCreated, DatabaseResponse{
-		Project:      info.Project,
-		Env:          info.Env,
-		DatabaseName: info.DatabaseName,
-		UserName:     info.UserName,
-		Password:     info.Password,
-		Host:         host,
-		Port:         port,
-		ConnString:   connStr,
-		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
+		Project:        info.Project,
+		Env:            info.Env,
+		DatabaseName:   info.DatabaseName,
+		UserName:       info.UserName,
+		Password:       info.Password,
+		Host:           host,
+		Port:           port,
+		ConnString:     connStr,
+		CreatedAt:      info.CreatedAt.Format(time.RFC3339),
+		BackupsEnabled: info.BackupsEnabled,
 	})
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"time"
 
 	"pgmanager/internal/backup"
@@ -59,6 +60,29 @@ func (m *Manager) checkBackupsEnabled() error {
 	return ErrBackupsDisabled
 }
 
+// cleanupTimeout bounds the compensating work that runs after an operation
+// has already failed. Generous enough for a DROP DATABASE or a DeleteObject
+// against a slow endpoint, short enough that a wedged cleanup can't pin a
+// goroutine indefinitely.
+const cleanupTimeout = 30 * time.Second
+
+// cleanupContext returns a context for compensating work — dropping a
+// half-restored database, deleting a partial object, recording a backup's
+// outcome — that must still run when the operation it is undoing failed.
+//
+// It deliberately does not inherit ctx's cancellation. By the time cleanup
+// runs, the most likely reason it is running at all is that ctx died: the
+// caller disconnected, or an HTTP deadline expired mid-dump. Handing that
+// dead context to the cleanup call makes it fail instantly and leaves behind
+// exactly the debris it exists to remove — a restored database and role in
+// Postgres with no metadata row through which an operator could ever find
+// or delete it, or a partial object in the bucket. Request-scoped values are
+// kept; only cancellation is dropped, and a fresh bound replaces it so
+// cleanup can never hang forever.
+func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+}
+
 // backupTarget resolves the project and database record a backup route
 // targets. It duplicates the project/database lookup in GetDatabase,
 // RotatePassword and DeleteDatabase rather than reusing DatabaseInfo,
@@ -90,6 +114,89 @@ func (m *Manager) backupTarget(ctx context.Context, projectName, env string, prN
 	}
 
 	return project, dbRecord, nil
+}
+
+// backupObjectKeys collects the stored object keys of every snapshot of one
+// database.
+//
+// Callers read these *before* deleting the database's metadata, because
+// pgmanager.backups references databases(id) ON DELETE CASCADE: the moment
+// the database row goes, every object_key goes with it, and an object whose
+// key pgmanager has forgotten can never be enumerated, deleted or even named
+// through pgmanager again. It would sit in the bucket forever, still holding
+// the contents of a database the operator believes they deleted.
+//
+// A failure to read the keys is logged rather than fatal — refusing to
+// delete a database because the metadata query hiccuped would be worse than
+// the leak it prevents.
+func (m *Manager) backupObjectKeys(ctx context.Context, dbID int64) []string {
+	backups, err := m.store.ListBackups(ctx, dbID)
+	if err != nil {
+		log.Printf("ERROR [delete]: could not list backups for database id %d; stored objects may be orphaned: %v", dbID, err)
+		return nil
+	}
+	keys := make([]string, 0, len(backups))
+	for _, b := range backups {
+		keys = append(keys, b.Key)
+	}
+	return keys
+}
+
+// projectBackupObjectKeys does the same for every database in one project,
+// keyed by database name so failures can name the database they belong to.
+func (m *Manager) projectBackupObjectKeys(ctx context.Context, projectName string) map[string][]string {
+	proj, err := m.store.GetProject(ctx, projectName)
+	if err != nil {
+		log.Printf("ERROR [delete project %s]: could not load the project; stored backup objects may be orphaned: %v", projectName, err)
+		return nil
+	}
+	if proj == nil {
+		return nil
+	}
+
+	dbs, err := m.store.ListDatabases(ctx, proj.ID)
+	if err != nil {
+		log.Printf("ERROR [delete project %s]: could not list databases; stored backup objects may be orphaned: %v", projectName, err)
+		return nil
+	}
+
+	keys := make(map[string][]string, len(dbs))
+	for _, d := range dbs {
+		if ks := m.backupObjectKeys(ctx, d.ID); len(ks) > 0 {
+			keys[d.Name] = ks
+		}
+	}
+	return keys
+}
+
+// deleteBackupObjects removes the stored snapshots of a database that has
+// just been deleted, using keys captured before its metadata went away.
+//
+// Best effort by design: an unreachable bucket must not stop an operator
+// from deleting a database, so every failure is logged with the exact key,
+// which is the only thing that still identifies the object once the metadata
+// is gone.
+func (m *Manager) deleteBackupObjects(ctx context.Context, dbName string, keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	if m.objects == nil {
+		log.Printf("ERROR [delete %s]: %d stored backup object(s) cannot be removed because backups are not configured on this server; orphaned keys: %s",
+			dbName, len(keys), strings.Join(keys, ", "))
+		return
+	}
+
+	// The metadata is already gone by now, so this runs on a cleanupContext:
+	// abandoning the bucket cleanup because the request that triggered it
+	// went away would orphan objects nothing can name any more.
+	cleanupCtx, cancel := cleanupContext(ctx)
+	defer cancel()
+
+	for _, key := range keys {
+		if err := m.objects.Delete(cleanupCtx, key); err != nil && !errors.Is(err, backup.ErrNotFound) {
+			log.Printf("ERROR [delete %s]: could not delete backup object %s; it is now orphaned: %v", dbName, key, err)
+		}
+	}
 }
 
 // SetBackupsEnabled turns the scheduled backup flag on or off for one
@@ -239,16 +346,27 @@ func (m *Manager) runBackup(ctx context.Context, projectName string, dbRecord *m
 	if failErr == nil {
 		failErr = dumpErr
 	}
+	// From here on the dump is over, one way or the other, and what is left
+	// is bookkeeping that must not be abandoned just because ctx died —
+	// dropping it would leave a row stuck in "running" (which retention
+	// never touches) next to an object nothing will ever delete.
+	finishCtx, cancelFinish := cleanupContext(ctx)
+	defer cancelFinish()
+
 	if failErr != nil {
 		// Best-effort: the object may not exist (Put may have failed before
 		// writing anything), but if it partially landed, don't leave a
 		// broken dump sitting in the bucket.
-		_ = m.objects.Delete(ctx, key)
-		_ = m.store.FinishBackup(ctx, snap.ID, size, meta.BackupStatusFailed, failErr.Error())
+		if err := m.objects.Delete(finishCtx, key); err != nil && !errors.Is(err, backup.ErrNotFound) {
+			log.Printf("ERROR [backup %s]: could not delete the partial object %s: %v", dbRecord.Name, key, err)
+		}
+		if err := m.store.FinishBackup(finishCtx, snap.ID, size, meta.BackupStatusFailed, failErr.Error()); err != nil {
+			log.Printf("ERROR [backup %s]: could not mark backup %d failed: %v", dbRecord.Name, snap.ID, err)
+		}
 		return nil, fmt.Errorf("backup of %s failed: %w", dbRecord.Name, failErr)
 	}
 
-	if err := m.store.FinishBackup(ctx, snap.ID, size, meta.BackupStatusSucceeded, ""); err != nil {
+	if err := m.store.FinishBackup(finishCtx, snap.ID, size, meta.BackupStatusSucceeded, ""); err != nil {
 		return nil, fmt.Errorf("failed to record finished backup: %w", err)
 	}
 

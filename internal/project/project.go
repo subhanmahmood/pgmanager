@@ -71,6 +71,11 @@ type DatabaseInfo struct {
 	ConnString   string
 	CreatedAt    time.Time
 	ExpiresAt    *time.Time
+	// BackupsEnabled mirrors the stored scheduled-backup flag. It is read
+	// straight off the metadata record so a caller (the CLI, the admin UI's
+	// toggle) can see the state it just set, and see it again after a
+	// restart.
+	BackupsEnabled bool
 	// RestoredFrom holds the source backup's ID when this database was
 	// created by a restore, and is nil otherwise.
 	RestoredFrom *int64
@@ -169,6 +174,11 @@ func (m *Manager) ListProjects(ctx context.Context) ([]meta.Project, error) {
 
 // DeleteProject deletes a project and all its databases
 func (m *Manager) DeleteProject(ctx context.Context, name string) error {
+	// Capture the stored backup keys first: store.DeleteProject cascades the
+	// project's databases away, and pgmanager.backups cascades with them, so
+	// after that call there is nothing left that names the S3 objects.
+	backupKeys := m.projectBackupObjectKeys(ctx, name)
+
 	// Get all databases for this project
 	databases, err := m.store.DeleteProject(ctx, name)
 	if err != nil {
@@ -181,6 +191,12 @@ func (m *Manager) DeleteProject(ctx context.Context, name string) error {
 			// Log but continue with other databases
 			fmt.Printf("Warning: failed to drop database %s: %v\n", db.Name, err)
 		}
+	}
+
+	// Stored snapshots last, so a bucket problem can't stop the deletion the
+	// caller asked for; failures are logged with the orphaned key.
+	for dbName, keys := range backupKeys {
+		m.deleteBackupObjects(ctx, dbName, keys)
 	}
 
 	return nil
@@ -320,18 +336,19 @@ func (m *Manager) GetDatabase(ctx context.Context, projectName, env string, prNu
 	host := m.cfg.Postgres.EffectiveHost()
 	port := m.cfg.Postgres.EffectivePort()
 	return &DatabaseInfo{
-		Project:      projectName,
-		Env:          env,
-		PRNumber:     dbRecord.PRNumber,
-		DatabaseName: dbRecord.Name,
-		UserName:     dbRecord.UserName,
-		Password:     dbRecord.Password,
-		Host:         host,
-		Port:         port,
-		ConnString:   db.ConnectionString(host, port, dbRecord.Name, dbRecord.UserName, dbRecord.Password, m.cfg.Postgres.SSLMode),
-		CreatedAt:    dbRecord.CreatedAt,
-		ExpiresAt:    dbRecord.ExpiresAt,
-		RestoredFrom: dbRecord.RestoredFrom,
+		Project:        projectName,
+		Env:            env,
+		PRNumber:       dbRecord.PRNumber,
+		DatabaseName:   dbRecord.Name,
+		UserName:       dbRecord.UserName,
+		Password:       dbRecord.Password,
+		Host:           host,
+		Port:           port,
+		ConnString:     db.ConnectionString(host, port, dbRecord.Name, dbRecord.UserName, dbRecord.Password, m.cfg.Postgres.SSLMode),
+		CreatedAt:      dbRecord.CreatedAt,
+		ExpiresAt:      dbRecord.ExpiresAt,
+		BackupsEnabled: dbRecord.BackupsEnabled,
+		RestoredFrom:   dbRecord.RestoredFrom,
 	}, nil
 }
 
@@ -387,18 +404,19 @@ func (m *Manager) ListDatabases(ctx context.Context, projectName string) ([]Data
 		}
 
 		result = append(result, DatabaseInfo{
-			Project:      projectNameStr,
-			Env:          env,
-			PRNumber:     dbItem.PRNumber,
-			DatabaseName: dbItem.Name,
-			UserName:     dbItem.UserName,
-			Password:     dbItem.Password,
-			Host:         host,
-			Port:         port,
-			ConnString:   db.ConnectionString(host, port, dbItem.Name, dbItem.UserName, dbItem.Password, m.cfg.Postgres.SSLMode),
-			CreatedAt:    dbItem.CreatedAt,
-			ExpiresAt:    dbItem.ExpiresAt,
-			RestoredFrom: dbItem.RestoredFrom,
+			Project:        projectNameStr,
+			Env:            env,
+			PRNumber:       dbItem.PRNumber,
+			DatabaseName:   dbItem.Name,
+			UserName:       dbItem.UserName,
+			Password:       dbItem.Password,
+			Host:           host,
+			Port:           port,
+			ConnString:     db.ConnectionString(host, port, dbItem.Name, dbItem.UserName, dbItem.Password, m.cfg.Postgres.SSLMode),
+			CreatedAt:      dbItem.CreatedAt,
+			ExpiresAt:      dbItem.ExpiresAt,
+			BackupsEnabled: dbItem.BackupsEnabled,
+			RestoredFrom:   dbItem.RestoredFrom,
 		})
 	}
 
@@ -437,18 +455,19 @@ func (m *Manager) RotatePassword(ctx context.Context, projectName, env string, p
 	host := m.cfg.Postgres.EffectiveHost()
 	port := m.cfg.Postgres.EffectivePort()
 	return &DatabaseInfo{
-		Project:      projectName,
-		Env:          env,
-		PRNumber:     dbRecord.PRNumber,
-		DatabaseName: dbRecord.Name,
-		UserName:     dbRecord.UserName,
-		Password:     password,
-		Host:         host,
-		Port:         port,
-		ConnString:   db.ConnectionString(host, port, dbRecord.Name, dbRecord.UserName, password, m.cfg.Postgres.SSLMode),
-		CreatedAt:    dbRecord.CreatedAt,
-		ExpiresAt:    dbRecord.ExpiresAt,
-		RestoredFrom: dbRecord.RestoredFrom,
+		Project:        projectName,
+		Env:            env,
+		PRNumber:       dbRecord.PRNumber,
+		DatabaseName:   dbRecord.Name,
+		UserName:       dbRecord.UserName,
+		Password:       password,
+		Host:           host,
+		Port:           port,
+		ConnString:     db.ConnectionString(host, port, dbRecord.Name, dbRecord.UserName, password, m.cfg.Postgres.SSLMode),
+		CreatedAt:      dbRecord.CreatedAt,
+		ExpiresAt:      dbRecord.ExpiresAt,
+		BackupsEnabled: dbRecord.BackupsEnabled,
+		RestoredFrom:   dbRecord.RestoredFrom,
 	}, nil
 }
 
@@ -459,6 +478,11 @@ func (m *Manager) DeleteDatabase(ctx context.Context, projectName, env string, p
 		return err
 	}
 
+	// Capture the stored backup keys first: the metadata delete below
+	// cascades this database's backup rows away, taking every object_key
+	// with them.
+	backupKeys := m.backupObjectKeys(ctx, dbRecord.ID)
+
 	// Drop from PostgreSQL
 	if err := m.pg.DropDatabase(ctx, dbRecord.Name, dbRecord.UserName); err != nil {
 		return fmt.Errorf("failed to drop database: %w", err)
@@ -468,6 +492,11 @@ func (m *Manager) DeleteDatabase(ctx context.Context, projectName, env string, p
 	if err := m.store.DeleteDatabase(ctx, dbRecord.Name); err != nil {
 		return fmt.Errorf("failed to delete database metadata: %w", err)
 	}
+
+	// Stored snapshots last. If either step above had failed we would still
+	// have both the database and its backups, which is the safe direction to
+	// fail in.
+	m.deleteBackupObjects(ctx, dbRecord.Name, backupKeys)
 
 	return nil
 }

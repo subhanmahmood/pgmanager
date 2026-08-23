@@ -116,7 +116,7 @@ export function BackupsCard({ db }: { db: DatabaseInfo }) {
             </span>
             <Switch
               id="backups-enabled"
-              checked={db.backups_enabled ?? false}
+              checked={db.backups_enabled}
               disabled={setEnabled.isPending}
               onCheckedChange={(checked) =>
                 setEnabled.mutate(checked, {

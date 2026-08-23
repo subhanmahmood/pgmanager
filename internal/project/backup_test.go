@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"pgmanager/internal/backup"
 	"pgmanager/internal/config"
+	"pgmanager/internal/db"
 	"pgmanager/internal/meta"
 )
 
@@ -290,5 +292,168 @@ func TestBackupNowDoesNotDeadlockWhenUploadFailsMidDump(t *testing.T) {
 	}
 	if len(backups) != 1 || backups[0].Status != meta.BackupStatusFailed {
 		t.Fatalf("backups = %+v, want exactly one failed row", backups)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup after a cancelled request.
+// ---------------------------------------------------------------------------
+
+// Cleanup runs precisely when something went wrong, and the commonest thing
+// to have gone wrong is the request context itself — the caller hung up, or
+// the deadline expired mid-dump. A cleanup that inherits that dead context
+// fails instantly and leaves behind exactly the debris it exists to remove.
+func TestCleanupContextOutlivesACancelledRequestContext(t *testing.T) {
+	type ctxKey string
+	parent, cancel := context.WithCancel(context.WithValue(context.Background(), ctxKey("request-id"), "abc123"))
+	cancel()
+
+	if parent.Err() == nil {
+		t.Fatal("precondition: the parent context should already be cancelled")
+	}
+
+	cleanupCtx, cleanupCancel := cleanupContext(parent)
+	defer cleanupCancel()
+
+	if err := cleanupCtx.Err(); err != nil {
+		t.Fatalf("cleanup context is already dead (%v); cleanup would fail before it started", err)
+	}
+	deadline, ok := cleanupCtx.Deadline()
+	if !ok {
+		t.Fatal("cleanup context has no deadline; a wedged cleanup could hang forever")
+	}
+	if budget := time.Until(deadline); budget > cleanupTimeout || budget < cleanupTimeout-time.Second {
+		t.Errorf("cleanup budget = %v, want ~%v", budget, cleanupTimeout)
+	}
+	// Request-scoped values must survive — only cancellation is dropped.
+	if got := cleanupCtx.Value(ctxKey("request-id")); got != "abc123" {
+		t.Errorf("request-id value = %v, want abc123", got)
+	}
+}
+
+// The same property, exercised through a real call path: MemoryStore honours
+// its context, so if deleteBackupObjects passed the request context straight
+// through, these objects would still be sitting in the bucket with no
+// metadata row left to name them.
+func TestDeleteBackupObjectsRunsWithACancelledRequestContext(t *testing.T) {
+	mgr, store, objects, dbID := newBackupTestManager(t, 3)
+
+	const key = "pgmanager/acme/acme_dev/20260823T120000Z-aabbccddeeff.dump"
+	seedBackup(t, store, objects, dbID, key, meta.BackupStatusSucceeded)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	keys := mgr.backupObjectKeys(ctx, dbID)
+	if len(keys) != 1 || keys[0] != key {
+		t.Fatalf("backupObjectKeys = %v, want [%s]", keys, key)
+	}
+	cancel()
+
+	mgr.deleteBackupObjects(ctx, "acme_dev", keys)
+
+	if objects.Has(key) {
+		t.Fatalf("object %s survived cleanup; it is now orphaned in the bucket", key)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Deleting a database or a project must take its stored objects with it.
+// ---------------------------------------------------------------------------
+
+// pgmanager.backups cascades on databases(id), so the object keys have to be
+// read before the metadata goes. Reading them afterwards is not a slower
+// path, it is an impossible one.
+func TestBackupObjectKeysCollectsEveryStoredSnapshot(t *testing.T) {
+	mgr, store, objects, dbID := newBackupTestManager(t, 3)
+	ctx := context.Background()
+
+	want := []string{
+		"pgmanager/acme/acme_dev/ok.dump",
+		"pgmanager/acme/acme_dev/failed.dump",
+	}
+	seedBackup(t, store, objects, dbID, want[0], meta.BackupStatusSucceeded)
+	seedBackup(t, store, objects, dbID, want[1], meta.BackupStatusFailed)
+
+	got := mgr.backupObjectKeys(ctx, dbID)
+	if len(got) != len(want) {
+		t.Fatalf("backupObjectKeys = %v, want %d keys", got, len(want))
+	}
+	for _, key := range want {
+		if !slices.Contains(got, key) {
+			t.Errorf("backupObjectKeys = %v, missing %s", got, key)
+		}
+	}
+}
+
+// Deleting a project cascades every database and every backup row away. If
+// the objects are not deleted with them, they stay in the bucket forever
+// holding the contents of databases the operator believes they deleted — and
+// with the keys gone from the metadata, pgmanager can never name them again.
+func TestDeleteProjectDeletesStoredBackupObjects(t *testing.T) {
+	mgr, store, objects, dbID := newBackupTestManager(t, 3)
+	ctx := context.Background()
+
+	keys := []string{
+		"pgmanager/acme/acme_dev/one.dump",
+		"pgmanager/acme/acme_dev/two.dump",
+	}
+	for _, key := range keys {
+		seedBackup(t, store, objects, dbID, key, meta.BackupStatusSucceeded)
+	}
+
+	// A second database in the same project, also with a snapshot, so the
+	// sweep is proven to cover more than the first database it finds.
+	p, err := store.GetProject(ctx, "acme")
+	if err != nil || p == nil {
+		t.Fatalf("get project: %v", err)
+	}
+	other, err := store.CreateDatabase(ctx, p.ID, "acme_prod", "acme_prod_user", "pw", "prod", nil, nil)
+	if err != nil {
+		t.Fatalf("create second database: %v", err)
+	}
+	const otherKey = "pgmanager/acme/acme_prod/one.dump"
+	seedBackup(t, store, objects, other.ID, otherKey, meta.BackupStatusSucceeded)
+
+	// DropDatabase reaches a Postgres that isn't there; DeleteProject logs
+	// that and carries on by design, which is exactly the path under test.
+	if err := mgr.DeleteProject(ctx, "acme"); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+
+	for _, key := range append(keys, otherKey) {
+		if objects.Has(key) {
+			t.Errorf("object %s survived project deletion; it is now orphaned in the bucket", key)
+		}
+	}
+}
+
+// The safe direction to fail in: if the Postgres drop fails, the database
+// still exists, so its backups must still exist too. Losing the only copy of
+// a database that is still running would be far worse than leaking an
+// object.
+func TestDeleteDatabaseKeepsBackupObjectsWhenTheDropFails(t *testing.T) {
+	mgr, store, objects, dbID := newBackupTestManager(t, 3)
+	ctx := context.Background()
+
+	// Point the manager at a port nothing can be listening on, so the drop
+	// is guaranteed to fail rather than depending on the test host.
+	mgr.cfg.Postgres.Port = 1
+	mgr.pg = db.NewPostgresClient(&mgr.cfg.Postgres)
+
+	const key = "pgmanager/acme/acme_dev/keep-me.dump"
+	seedBackup(t, store, objects, dbID, key, meta.BackupStatusSucceeded)
+
+	if err := mgr.DeleteDatabase(ctx, "acme", "dev", nil); err == nil {
+		t.Fatal("DeleteDatabase succeeded without a reachable Postgres; the test can't prove anything")
+	}
+
+	if !objects.Has(key) {
+		t.Errorf("object %s was deleted even though the database was not; its only backup is gone", key)
+	}
+	remaining, err := store.ListBackups(ctx, dbID)
+	if err != nil {
+		t.Fatalf("list backups: %v", err)
+	}
+	if len(remaining) != 1 {
+		t.Errorf("backup rows = %d, want 1", len(remaining))
 	}
 }

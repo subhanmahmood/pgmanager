@@ -48,7 +48,10 @@ export interface DatabaseInfo {
   port: number
   created_at: string
   expires_at?: string
-  backups_enabled?: boolean
+  /** Whether the server's scheduler backs this database up. Always sent by
+   *  the API (never omitted), so the toggle can render the stored state
+   *  rather than assuming off. */
+  backups_enabled: boolean
   /** Set only on a database created by a restore: the source backup's ID. */
   restored_from?: number
 }

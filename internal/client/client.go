@@ -29,6 +29,10 @@ type Database struct {
 	ConnString   string     `json:"connection_string,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
 	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	// BackupsEnabled is the stored scheduled-backup flag, so `db info` can
+	// show the state `db backup --enable/--disable` set — including after a
+	// server restart.
+	BackupsEnabled bool `json:"backups_enabled"`
 }
 
 // Backup is one stored dump of a database. Mirrors the API's

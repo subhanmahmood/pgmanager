@@ -51,7 +51,14 @@ func NewMemoryStore() *MemoryStore {
 }
 
 // Put implements ObjectStore.
-func (m *MemoryStore) Put(_ context.Context, key string, body io.Reader) (int64, error) {
+//
+// Like the real S3 client, it honours ctx: a caller that passes an already
+// cancelled context gets an error instead of a stored object. Cleanup paths
+// depend on that distinction, so the fake has to make it too.
+func (m *MemoryStore) Put(ctx context.Context, key string, body io.Reader) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	m.mu.Lock()
 	putErr := m.PutErr
 	failAfter := m.FailPutAfterBytes
@@ -85,8 +92,11 @@ func (m *MemoryStore) Put(_ context.Context, key string, body io.Reader) (int64,
 	return int64(len(data)), nil
 }
 
-// Get implements ObjectStore.
-func (m *MemoryStore) Get(_ context.Context, key string) (io.ReadCloser, error) {
+// Get implements ObjectStore. It honours ctx, like Put.
+func (m *MemoryStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -101,8 +111,14 @@ func (m *MemoryStore) Get(_ context.Context, key string) (io.ReadCloser, error) 
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
-// Delete implements ObjectStore.
-func (m *MemoryStore) Delete(_ context.Context, key string) error {
+// Delete implements ObjectStore. It honours ctx, like Put — which is what
+// lets a test tell "the caller cleaned up with a live context" apart from
+// "the caller passed on the dead request context and the delete silently
+// did nothing".
+func (m *MemoryStore) Delete(ctx context.Context, key string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

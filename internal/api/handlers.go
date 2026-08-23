@@ -46,6 +46,10 @@ type DatabaseResponse struct {
 	ConnString   string  `json:"connection_string"`
 	CreatedAt    string  `json:"created_at"`
 	ExpiresAt    *string `json:"expires_at,omitempty"`
+	// BackupsEnabled is always serialized, never omitted: the admin UI's
+	// toggle and the CLI both read it as the authoritative state, and an
+	// absent field would be indistinguishable from "off".
+	BackupsEnabled bool `json:"backups_enabled"`
 }
 
 // DatabaseInfoResponse is returned when listing/getting databases (no sensitive info).
@@ -59,6 +63,9 @@ type DatabaseInfoResponse struct {
 	Port         int     `json:"port"`
 	CreatedAt    string  `json:"created_at"`
 	ExpiresAt    *string `json:"expires_at,omitempty"`
+	// BackupsEnabled is always serialized, never omitted — see
+	// DatabaseResponse.BackupsEnabled.
+	BackupsEnabled bool `json:"backups_enabled"`
 	// RestoredFrom holds the source backup's ID when this database was
 	// created by a restore, and is omitted otherwise.
 	RestoredFrom *int64 `json:"restored_from,omitempty"`
@@ -211,16 +218,17 @@ func (s *Server) listDatabases(w http.ResponseWriter, r *http.Request) {
 			expiresAt = &t
 		}
 		response[i] = DatabaseInfoResponse{
-			Project:      info.Project,
-			Env:          info.Env,
-			PRNumber:     info.PRNumber,
-			DatabaseName: info.DatabaseName,
-			UserName:     info.UserName,
-			Host:         host,
-			Port:         port,
-			CreatedAt:    info.CreatedAt.Format(time.RFC3339),
-			ExpiresAt:    expiresAt,
-			RestoredFrom: info.RestoredFrom,
+			Project:        info.Project,
+			Env:            info.Env,
+			PRNumber:       info.PRNumber,
+			DatabaseName:   info.DatabaseName,
+			UserName:       info.UserName,
+			Host:           host,
+			Port:           port,
+			CreatedAt:      info.CreatedAt.Format(time.RFC3339),
+			ExpiresAt:      expiresAt,
+			BackupsEnabled: info.BackupsEnabled,
+			RestoredFrom:   info.RestoredFrom,
 		}
 	}
 	writeJSON(w, http.StatusOK, response)
@@ -269,17 +277,18 @@ func (s *Server) createDatabase(w http.ResponseWriter, r *http.Request) {
 	}
 	host, port, connStr := s.withPublicHost(r, info.DatabaseName, info.UserName, info.Password)
 	writeJSON(w, http.StatusCreated, DatabaseResponse{
-		Project:      info.Project,
-		Env:          info.Env,
-		PRNumber:     info.PRNumber,
-		DatabaseName: info.DatabaseName,
-		UserName:     info.UserName,
-		Password:     info.Password,
-		Host:         host,
-		Port:         port,
-		ConnString:   connStr,
-		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
-		ExpiresAt:    expiresAt,
+		Project:        info.Project,
+		Env:            info.Env,
+		PRNumber:       info.PRNumber,
+		DatabaseName:   info.DatabaseName,
+		UserName:       info.UserName,
+		Password:       info.Password,
+		Host:           host,
+		Port:           port,
+		ConnString:     connStr,
+		CreatedAt:      info.CreatedAt.Format(time.RFC3339),
+		ExpiresAt:      expiresAt,
+		BackupsEnabled: info.BackupsEnabled,
 	})
 }
 
@@ -312,16 +321,17 @@ func (s *Server) getDatabase(w http.ResponseWriter, r *http.Request) {
 	}
 	host, port := s.publicHostPort(r)
 	writeJSON(w, http.StatusOK, DatabaseInfoResponse{
-		Project:      info.Project,
-		Env:          info.Env,
-		PRNumber:     info.PRNumber,
-		DatabaseName: info.DatabaseName,
-		UserName:     info.UserName,
-		Host:         host,
-		Port:         port,
-		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
-		ExpiresAt:    expiresAt,
-		RestoredFrom: info.RestoredFrom,
+		Project:        info.Project,
+		Env:            info.Env,
+		PRNumber:       info.PRNumber,
+		DatabaseName:   info.DatabaseName,
+		UserName:       info.UserName,
+		Host:           host,
+		Port:           port,
+		CreatedAt:      info.CreatedAt.Format(time.RFC3339),
+		ExpiresAt:      expiresAt,
+		BackupsEnabled: info.BackupsEnabled,
+		RestoredFrom:   info.RestoredFrom,
 	})
 }
 
@@ -356,17 +366,18 @@ func (s *Server) getDatabaseCredentials(w http.ResponseWriter, r *http.Request) 
 	}
 	host, port, connStr := s.withPublicHost(r, info.DatabaseName, info.UserName, info.Password)
 	writeJSON(w, http.StatusOK, DatabaseResponse{
-		Project:      info.Project,
-		Env:          info.Env,
-		PRNumber:     info.PRNumber,
-		DatabaseName: info.DatabaseName,
-		UserName:     info.UserName,
-		Password:     info.Password,
-		Host:         host,
-		Port:         port,
-		ConnString:   connStr,
-		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
-		ExpiresAt:    expiresAt,
+		Project:        info.Project,
+		Env:            info.Env,
+		PRNumber:       info.PRNumber,
+		DatabaseName:   info.DatabaseName,
+		UserName:       info.UserName,
+		Password:       info.Password,
+		Host:           host,
+		Port:           port,
+		ConnString:     connStr,
+		CreatedAt:      info.CreatedAt.Format(time.RFC3339),
+		ExpiresAt:      expiresAt,
+		BackupsEnabled: info.BackupsEnabled,
 	})
 }
 
@@ -406,17 +417,18 @@ func (s *Server) rotateDatabasePassword(w http.ResponseWriter, r *http.Request) 
 	}
 	host, port, connStr := s.withPublicHost(r, info.DatabaseName, info.UserName, info.Password)
 	writeJSON(w, http.StatusOK, DatabaseResponse{
-		Project:      info.Project,
-		Env:          info.Env,
-		PRNumber:     info.PRNumber,
-		DatabaseName: info.DatabaseName,
-		UserName:     info.UserName,
-		Password:     info.Password,
-		Host:         host,
-		Port:         port,
-		ConnString:   connStr,
-		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
-		ExpiresAt:    expiresAt,
+		Project:        info.Project,
+		Env:            info.Env,
+		PRNumber:       info.PRNumber,
+		DatabaseName:   info.DatabaseName,
+		UserName:       info.UserName,
+		Password:       info.Password,
+		Host:           host,
+		Port:           port,
+		ConnString:     connStr,
+		CreatedAt:      info.CreatedAt.Format(time.RFC3339),
+		ExpiresAt:      expiresAt,
+		BackupsEnabled: info.BackupsEnabled,
 	})
 }
 

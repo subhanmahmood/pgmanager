@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"pgmanager/internal/backup"
@@ -98,13 +99,13 @@ func (m *Manager) RestoreBackup(ctx context.Context, projectName, env string, pr
 	}
 
 	if err := m.restoreSnapshotInto(ctx, newName, newUser, password, snap.Key); err != nil {
-		_ = m.pg.DropDatabase(ctx, newName, newUser)
+		m.rollbackRestore(ctx, newName, newUser, err)
 		return nil, err
 	}
 
 	dbRecord, err := m.store.CreateRestoredDatabase(ctx, project.ID, backupID, newName, newUser, password, source.Env)
 	if err != nil {
-		_ = m.pg.DropDatabase(ctx, newName, newUser)
+		m.rollbackRestore(ctx, newName, newUser, err)
 		return nil, fmt.Errorf("failed to store restored database metadata: %w", err)
 	}
 
@@ -122,6 +123,30 @@ func (m *Manager) RestoreBackup(ctx context.Context, projectName, env string, pr
 		CreatedAt:    dbRecord.CreatedAt,
 		RestoredFrom: dbRecord.RestoredFrom,
 	}, nil
+}
+
+// rollbackRestore drops the database and role a failed restore already
+// created.
+//
+// It runs on a cleanupContext rather than on ctx, because the commonest
+// reason to be here is that ctx itself is what failed: the caller
+// disconnected, or the request deadline expired during pg_restore. Passing
+// the dead context to DropDatabase would make the rollback fail immediately
+// and leave a half-restored database and its role in Postgres with *no*
+// pgmanager metadata row — nothing the operator could then find or delete
+// through pgmanager at all, since the metadata is only written once the
+// restore has succeeded.
+//
+// A failure to roll back is logged loudly and precisely, naming both
+// identifiers, because at that point a human has to remove them by hand.
+func (m *Manager) rollbackRestore(ctx context.Context, dbName, userName string, cause error) {
+	cleanupCtx, cancel := cleanupContext(ctx)
+	defer cancel()
+
+	if err := m.pg.DropDatabase(cleanupCtx, dbName, userName); err != nil {
+		log.Printf("ERROR [restore %s]: restore failed (%v) and rolling it back also failed: %v", dbName, cause, err)
+		log.Printf("ERROR [restore %s]: database %q and role %q may still exist in Postgres with no pgmanager metadata — drop them by hand", dbName, dbName, userName)
+	}
 }
 
 // restoreSnapshotInto downloads the snapshot object and streams it directly

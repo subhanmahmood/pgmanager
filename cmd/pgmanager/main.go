@@ -510,6 +510,11 @@ func newDBCmd() *cobra.Command {
 					if info.ExpiresAt != nil {
 						fmt.Printf("Expires:  %s\n", info.ExpiresAt.Format("2006-01-02 15:04:05"))
 					}
+					if info.BackupsEnabled {
+						fmt.Println("Backups:  scheduled")
+					} else {
+						fmt.Println("Backups:  off")
+					}
 					fmt.Println("\nFor password/connection string: pgmanager db credentials", info.Project, envOf(info))
 				})
 			},

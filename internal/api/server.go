@@ -69,7 +69,9 @@ func (s *Server) buildRouter(authMW func(http.Handler) http.Handler) *chi.Mux {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Timeout(60 * time.Second))
+	// Deadlines are per-route: the backup and restore routes get a far
+	// longer budget than everything else. See requestTimeoutMiddleware.
+	r.Use(requestTimeoutMiddleware)
 
 	r.Use(securityHeadersMiddleware)
 
