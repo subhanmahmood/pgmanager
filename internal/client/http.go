@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -126,13 +127,23 @@ func (c *HTTPClient) DeleteProject(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete, "/projects/"+url.PathEscape(name), nil, nil)
 }
 
-func (c *HTTPClient) CreateDatabase(ctx context.Context, projectName, env string, prNumber *int, extensions []string) (*Database, error) {
+func (c *HTTPClient) CreateDatabase(ctx context.Context, projectName, env, key string, extensions []string, ttl string) (*Database, error) {
 	body := map[string]interface{}{"env": env}
-	if prNumber != nil {
-		body["pr_number"] = *prNumber
+	if key != "" {
+		body["key"] = key
+		// pr_number as well, so a new CLI still works against a server that
+		// predates keys.
+		if env == "pr" {
+			if n, err := strconv.Atoi(key); err == nil {
+				body["pr_number"] = n
+			}
+		}
 	}
 	if len(extensions) > 0 {
 		body["extensions"] = extensions
+	}
+	if ttl != "" {
+		body["ttl"] = ttl
 	}
 	var out Database
 	if err := c.do(ctx, http.MethodPost, "/projects/"+url.PathEscape(projectName)+"/databases", body, &out); err != nil {
@@ -141,8 +152,8 @@ func (c *HTTPClient) CreateDatabase(ctx context.Context, projectName, env string
 	return &out, nil
 }
 
-func (c *HTTPClient) GetDatabase(ctx context.Context, projectName, env string, prNumber *int) (*Database, error) {
-	path := dbPath(projectName, env, prNumber)
+func (c *HTTPClient) GetDatabase(ctx context.Context, projectName, env, key string) (*Database, error) {
+	path := dbPath(projectName, env, key)
 	var out Database
 	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
 		return nil, err
@@ -150,8 +161,8 @@ func (c *HTTPClient) GetDatabase(ctx context.Context, projectName, env string, p
 	return &out, nil
 }
 
-func (c *HTTPClient) GetDatabaseCredentials(ctx context.Context, projectName, env string, prNumber *int) (*Database, error) {
-	path := dbPath(projectName, env, prNumber) + "/credentials"
+func (c *HTTPClient) GetDatabaseCredentials(ctx context.Context, projectName, env, key string) (*Database, error) {
+	path := dbPath(projectName, env, key) + "/credentials"
 	var out Database
 	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
 		return nil, err
@@ -167,8 +178,8 @@ func (c *HTTPClient) ListDatabases(ctx context.Context, projectName string) ([]D
 	return out, nil
 }
 
-func (c *HTTPClient) RotatePassword(ctx context.Context, projectName, env string, prNumber *int, terminate bool) (*Database, error) {
-	path := dbPath(projectName, env, prNumber) + "/rotate"
+func (c *HTTPClient) RotatePassword(ctx context.Context, projectName, env, key string, terminate bool) (*Database, error) {
+	path := dbPath(projectName, env, key) + "/rotate"
 	body := map[string]bool{"terminate": terminate}
 	var out Database
 	if err := c.do(ctx, http.MethodPost, path, body, &out); err != nil {
@@ -177,8 +188,20 @@ func (c *HTTPClient) RotatePassword(ctx context.Context, projectName, env string
 	return &out, nil
 }
 
-func (c *HTTPClient) DeleteDatabase(ctx context.Context, projectName, env string, prNumber *int) error {
-	return c.do(ctx, http.MethodDelete, dbPath(projectName, env, prNumber), nil, nil)
+func (c *HTTPClient) DeleteDatabase(ctx context.Context, projectName, env, key string) error {
+	return c.do(ctx, http.MethodDelete, dbPath(projectName, env, key), nil, nil)
+}
+
+func (c *HTTPClient) RenewDatabase(ctx context.Context, projectName, env, key, ttl string) (*Database, error) {
+	var out Database
+	body := map[string]interface{}{}
+	if ttl != "" {
+		body["ttl"] = ttl
+	}
+	if err := c.do(ctx, http.MethodPost, dbPath(projectName, env, key)+"/renew", body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func (c *HTTPClient) Cleanup(ctx context.Context, olderThan time.Duration) ([]string, error) {
@@ -230,12 +253,12 @@ func (c *HTTPClient) RevokeToken(ctx context.Context, prefix string) error {
 	return c.do(ctx, http.MethodDelete, "/auth/tokens/"+url.PathEscape(prefix), nil, nil)
 }
 
-func dbPath(projectName, env string, prNumber *int) string {
+func dbPath(projectName, env, key string) string {
 	envSeg := env
-	if env == "pr" && prNumber != nil {
-		envSeg = fmt.Sprintf("pr_%d", *prNumber)
+	if key != "" {
+		envSeg = env + "_" + key
 	}
-	return "/projects/" + url.PathEscape(projectName) + "/databases/" + envSeg
+	return "/projects/" + url.PathEscape(projectName) + "/databases/" + url.PathEscape(envSeg)
 }
 
 func formatDuration(d time.Duration) string {

@@ -60,6 +60,7 @@
   --color-env-staging: var(--env-staging);
   --color-env-prod: var(--env-prod);
   --color-env-pr: var(--env-pr);
+  --color-env-scratch: var(--env-scratch);
 
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -99,6 +100,7 @@
   --env-staging: oklch(0.6 0.14 70);
   --env-prod: oklch(0.55 0.2 27);
   --env-pr: oklch(0.55 0.15 245);
+  --env-scratch: oklch(0.55 0.16 305);
 
   /* Dev-tool surfaces lean on borders; shadows stay near-invisible. */
   --shadow-subtle: 0 1px 2px 0 oklch(0.2 0.02 265 / 0.05);
@@ -133,6 +135,7 @@
   --env-staging: oklch(0.78 0.14 76);
   --env-prod: oklch(0.68 0.18 26);
   --env-pr: oklch(0.72 0.14 245);
+  --env-scratch: oklch(0.73 0.14 305);
 
   --shadow-subtle: 0 1px 2px 0 oklch(0 0 0 / 0.3);
   --shadow-raised: 0 8px 30px -8px oklch(0 0 0 / 0.5);

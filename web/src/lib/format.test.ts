@@ -19,15 +19,23 @@ describe('envSegment', () => {
     expect(envSegment({ env: 'prod' })).toBe('prod')
   })
 
-  it('encodes the PR number', () => {
+  it('encodes the key for keyed envs', () => {
+    expect(envSegment({ env: 'pr', key: '42' })).toBe('pr_42')
+    expect(envSegment({ env: 'scratch', key: 'epic_231' })).toBe('scratch_epic_231')
+  })
+
+  it('falls back to pr_number from a server that predates key', () => {
     expect(envSegment({ env: 'pr', pr_number: 42 })).toBe('pr_42')
   })
 
   it('round-trips through parseEnvSegment', () => {
-    expect(parseEnvSegment('pr_42')).toEqual({ env: 'pr', prNumber: 42 })
+    expect(parseEnvSegment('pr_42')).toEqual({ env: 'pr', key: '42' })
+    expect(parseEnvSegment('scratch_epic_231')).toEqual({ env: 'scratch', key: 'epic_231' })
     expect(parseEnvSegment('staging')).toEqual({ env: 'staging' })
     // "pr" alone is the env, not a malformed PR segment.
     expect(parseEnvSegment('pr')).toEqual({ env: 'pr' })
+    // An underscore in a non-keyed env is not a separator.
+    expect(parseEnvSegment('dev_extra')).toEqual({ env: 'dev_extra' })
   })
 })
 

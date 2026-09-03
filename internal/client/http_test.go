@@ -46,21 +46,21 @@ func TestHTTPClientAPIError(t *testing.T) {
 }
 
 func TestDBPath(t *testing.T) {
-	pr := 42
 	cases := []struct {
 		project string
 		env     string
-		pr      *int
+		key     string
 		want    string
 	}{
-		{"myapp", "dev", nil, "/projects/myapp/databases/dev"},
-		{"myapp", "pr", &pr, "/projects/myapp/databases/pr_42"},
-		{"my app", "dev", nil, "/projects/my%20app/databases/dev"},
+		{"myapp", "dev", "", "/projects/myapp/databases/dev"},
+		{"myapp", "pr", "42", "/projects/myapp/databases/pr_42"},
+		{"myapp", "scratch", "epic_231", "/projects/myapp/databases/scratch_epic_231"},
+		{"my app", "dev", "", "/projects/my%20app/databases/dev"},
 	}
 	for _, tc := range cases {
-		got := dbPath(tc.project, tc.env, tc.pr)
+		got := dbPath(tc.project, tc.env, tc.key)
 		if got != tc.want {
-			t.Errorf("dbPath(%s,%s,%v) = %q want %q", tc.project, tc.env, tc.pr, got, tc.want)
+			t.Errorf("dbPath(%s,%s,%q) = %q want %q", tc.project, tc.env, tc.key, got, tc.want)
 		}
 	}
 }

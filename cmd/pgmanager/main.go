@@ -220,17 +220,25 @@ func newDBCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "db", Short: "Manage databases"}
 
 	var extensions []string
+	var ttl string
 	createCmd := &cobra.Command{
-		Use:   "create <project> <env> [pr-number]",
+		Use:   "create <project> <env> [key]",
 		Short: "Create a database",
-		Long: "Create a database. env: prod, dev, staging, or pr (PR requires the PR number).\n\n" +
+		Long: "Create a database. env: prod, dev, staging, pr, or scratch.\n\n" +
+			"pr and scratch are keyed envs: they hold many databases, so they need a\n" +
+			"third argument. pr takes the PR number; scratch takes a label of your own\n" +
+			"(e.g. `scratch epic_231`), which becomes <project>_scratch_<label>.\n\n" +
+			"Keyed databases are leased — they are dropped once the lease lapses, and\n" +
+			"`db renew` pushes it out for as long as the work is still live. --ttl sets\n" +
+			"the initial lease; without it the server's default applies. prod, dev and\n" +
+			"staging are permanent and take no lease.\n\n" +
 			"Repeat --extension/-x to install Postgres extensions in the new database\n" +
 			"(e.g. --extension vector -x pg_trgm). Extensions usually require superuser,\n" +
 			"so this runs with the server's admin credentials.",
 		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			project, env, prNumber, err := parseDBArgs(args)
+			proj, env, key, err := parseDBArgs(args)
 			if err != nil {
 				return err
 			}
@@ -239,7 +247,7 @@ func newDBCmd() *cobra.Command {
 				return err
 			}
 			defer c.Close()
-			info, err := c.CreateDatabase(ctx, project, env, prNumber, extensions)
+			info, err := c.CreateDatabase(ctx, proj, env, key, extensions, ttl)
 			if err != nil {
 				return err
 			}
@@ -250,10 +258,51 @@ func newDBCmd() *cobra.Command {
 	}
 	createCmd.Flags().StringSliceVarP(&extensions, "extension", "x", nil,
 		"Postgres extension to install (repeatable; e.g. -x vector -x pg_trgm)")
+	createCmd.Flags().StringVar(&ttl, "ttl", "",
+		"initial lease for a keyed database, e.g. 14d (default: the server's)")
+
+	var renewTTL string
+	renewCmd := &cobra.Command{
+		Use:   "renew <project> <env> <key>",
+		Short: "Extend a database's lease so it is not cleaned up",
+		Long: "Keyed databases (pr, scratch) are leased: cleanup drops them once the lease\n" +
+			"lapses. Renewing pushes the expiry out from now, so a database stays alive\n" +
+			"exactly as long as something keeps saying it is still needed — and one that\n" +
+			"is abandoned goes away on its own.\n\n" +
+			"Call it from whatever drives the work (a CI job, an agent's tick loop):\n" +
+			"  pgmanager db renew myapp scratch epic_231 --ttl 14d\n\n" +
+			"prod, dev and staging are permanent and have no lease to renew.",
+		Args: cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			proj, env, key, err := parseDBArgs(args)
+			if err != nil {
+				return err
+			}
+			c, _, err := getClient()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			info, err := c.RenewDatabase(ctx, proj, env, key, renewTTL)
+			if err != nil {
+				return err
+			}
+			return emit(info, func() {
+				if info.ExpiresAt != nil {
+					fmt.Printf("%s leased until %s\n", info.DatabaseName, info.ExpiresAt.Format("2006-01-02 15:04"))
+					return
+				}
+				fmt.Printf("%s renewed\n", info.DatabaseName)
+			})
+		},
+	}
+	renewCmd.Flags().StringVar(&renewTTL, "ttl", "",
+		"how long from now the lease should run, e.g. 14d (default: the server's)")
 
 	var terminate, verboseRotate bool
 	rotateCmd := &cobra.Command{
-		Use:   "rotate <project> <env> [pr-number]",
+		Use:   "rotate <project> <env> [key]",
 		Short: "Generate a new password for a database's user",
 		Long: "Replaces the password of the database's own Postgres role with a freshly\n" +
 			"generated one. Anything still using the old password will fail to connect,\n" +
@@ -265,7 +314,7 @@ func newDBCmd() *cobra.Command {
 		Args: cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			project, env, prNumber, err := parseDBArgs(args)
+			proj, env, key, err := parseDBArgs(args)
 			if err != nil {
 				return err
 			}
@@ -274,7 +323,7 @@ func newDBCmd() *cobra.Command {
 				return err
 			}
 			defer c.Close()
-			info, err := c.RotatePassword(ctx, project, env, prNumber, terminate)
+			info, err := c.RotatePassword(ctx, proj, env, key, terminate)
 			if err != nil {
 				return err
 			}
@@ -296,14 +345,15 @@ func newDBCmd() *cobra.Command {
 
 	cmd.AddCommand(
 		createCmd,
+		renewCmd,
 		rotateCmd,
 		&cobra.Command{
-			Use:   "delete <project> <env> [pr-number]",
+			Use:   "delete <project> <env> [key]",
 			Short: "Delete a database",
 			Args:  cobra.RangeArgs(2, 3),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				ctx := cmd.Context()
-				project, env, prNumber, err := parseDBArgs(args)
+				proj, env, key, err := parseDBArgs(args)
 				if err != nil {
 					return err
 				}
@@ -312,7 +362,7 @@ func newDBCmd() *cobra.Command {
 					return err
 				}
 				defer c.Close()
-				if err := c.DeleteDatabase(ctx, project, env, prNumber); err != nil {
+				if err := c.DeleteDatabase(ctx, proj, env, key); err != nil {
 					return err
 				}
 				return emit(map[string]string{"status": "deleted"}, func() {
@@ -344,25 +394,33 @@ func newDBCmd() *cobra.Command {
 						fmt.Println("No databases found")
 						return
 					}
-					fmt.Printf("%-15s %-10s %-25s %-20s\n", "PROJECT", "ENV", "DATABASE", "CREATED")
-					fmt.Println(strings.Repeat("-", 72))
+					fmt.Printf("%-15s %-16s %-30s %-18s %-18s\n", "PROJECT", "ENV", "DATABASE", "CREATED", "EXPIRES")
+					fmt.Println(strings.Repeat("-", 100))
 					for _, db := range dbs {
 						envStr := db.Env
-						if db.PRNumber != nil {
-							envStr = fmt.Sprintf("pr_%d", *db.PRNumber)
+						if db.Key != "" {
+							envStr = db.Env + "_" + db.Key
 						}
-						fmt.Printf("%-15s %-10s %-25s %-20s\n", db.Project, envStr, db.DatabaseName, db.CreatedAt.Format("2006-01-02 15:04"))
+						expires := "never"
+						if db.ExpiresAt != nil {
+							expires = db.ExpiresAt.Format("2006-01-02 15:04")
+							if db.ExpiresAt.Before(time.Now()) {
+								expires += " (lapsed)"
+							}
+						}
+						fmt.Printf("%-15s %-16s %-30s %-18s %-18s\n", db.Project, envStr, db.DatabaseName,
+							db.CreatedAt.Format("2006-01-02 15:04"), expires)
 					}
 				})
 			},
 		},
 		&cobra.Command{
-			Use:   "info <project> <env> [pr-number]",
+			Use:   "info <project> <env> [key]",
 			Short: "Show database connection information (no password)",
 			Args:  cobra.RangeArgs(2, 3),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				ctx := cmd.Context()
-				project, env, prNumber, err := parseDBArgs(args)
+				proj, env, key, err := parseDBArgs(args)
 				if err != nil {
 					return err
 				}
@@ -371,7 +429,7 @@ func newDBCmd() *cobra.Command {
 					return err
 				}
 				defer c.Close()
-				info, err := c.GetDatabase(ctx, project, env, prNumber)
+				info, err := c.GetDatabase(ctx, proj, env, key)
 				if err != nil {
 					return err
 				}
@@ -386,12 +444,12 @@ func newDBCmd() *cobra.Command {
 			},
 		},
 		&cobra.Command{
-			Use:   "credentials <project> <env> [pr-number]",
+			Use:   "credentials <project> <env> [key]",
 			Short: "Fetch the connection string and password for an existing database",
 			Args:  cobra.RangeArgs(2, 3),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				ctx := cmd.Context()
-				project, env, prNumber, err := parseDBArgs(args)
+				proj, env, key, err := parseDBArgs(args)
 				if err != nil {
 					return err
 				}
@@ -400,7 +458,7 @@ func newDBCmd() *cobra.Command {
 					return err
 				}
 				defer c.Close()
-				info, err := c.GetDatabaseCredentials(ctx, project, env, prNumber)
+				info, err := c.GetDatabaseCredentials(ctx, proj, env, key)
 				if err != nil {
 					return err
 				}
@@ -1415,25 +1473,26 @@ func updateCacheDir() string {
 
 // --- helpers ----------------------------------------------------------------
 
-func parseDBArgs(args []string) (project, env string, prNumber *int, err error) {
-	project = args[0]
+// parseDBArgs reads the <project> <env> [key] form every db subcommand shares.
+// A keyed env (pr, scratch) requires the third argument; the rest reject it.
+func parseDBArgs(args []string) (proj, env, key string, err error) {
+	proj = args[0]
 	env = args[1]
-	if env == "pr" {
-		if len(args) < 3 {
-			return "", "", nil, fmt.Errorf("PR number is required for PR databases")
-		}
-		num, perr := strconv.Atoi(args[2])
-		if perr != nil {
-			return "", "", nil, fmt.Errorf("invalid PR number: %s", args[2])
-		}
-		prNumber = &num
+	if len(args) > 2 {
+		key = args[2]
 	}
-	return
+	if err := project.ValidateEnv(env); err != nil {
+		return "", "", "", err
+	}
+	if err := project.ValidateKey(env, key); err != nil {
+		return "", "", "", err
+	}
+	return proj, env, key, nil
 }
 
 func envOf(d *client.Database) string {
-	if d.PRNumber != nil {
-		return fmt.Sprintf("pr %d", *d.PRNumber)
+	if d.Key != "" {
+		return d.Env + " " + d.Key
 	}
 	return d.Env
 }

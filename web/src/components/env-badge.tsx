@@ -8,13 +8,14 @@ const TONE: Record<string, string> = {
   staging: 'border-env-staging/35 text-env-staging bg-env-staging/10',
   prod: 'border-env-prod/40 text-env-prod bg-env-prod/10',
   pr: 'border-env-pr/35 text-env-pr bg-env-pr/10',
+  scratch: 'border-env-scratch/35 text-env-scratch bg-env-scratch/10',
 }
 
 export function EnvBadge({
   db,
   className,
 }: {
-  db: Pick<DatabaseInfo, 'env' | 'pr_number'>
+  db: Pick<DatabaseInfo, 'env' | 'key' | 'pr_number'>
   className?: string
 }) {
   return (

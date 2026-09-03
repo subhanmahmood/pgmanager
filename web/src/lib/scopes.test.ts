@@ -109,6 +109,7 @@ describe('validateScope', () => {
       'project:myapp:env:prod',
       'project:myapp:env:dev',
       'project:myapp:env:staging',
+      'project:myapp:env:scratch',
       'project:myapp:env:pr',
       'project:myapp:pr:*',
     ]) {

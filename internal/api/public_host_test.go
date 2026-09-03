@@ -31,7 +31,7 @@ func makeServer(t *testing.T, cfg *config.Config) (*Server, *meta.MockStore) {
 	if err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
-	if _, err := store.CreateDatabase(ctx, p.ID, "content_dev", "content_dev_user", "secret", "dev", nil, nil); err != nil {
+	if _, err := store.CreateDatabase(ctx, p.ID, "content_dev", "content_dev_user", "secret", "dev", "", nil); err != nil {
 		t.Fatalf("seed database: %v", err)
 	}
 
@@ -178,12 +178,12 @@ func TestPublicHostPort_NoRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
-	if _, err := store.CreateDatabase(ctx, p.ID, "content_dev", "content_dev_user", "secret", "dev", nil, nil); err != nil {
+	if _, err := store.CreateDatabase(ctx, p.ID, "content_dev", "content_dev_user", "secret", "dev", "", nil); err != nil {
 		t.Fatalf("seed database: %v", err)
 	}
 
 	mgr := project.NewManager(cfg, store)
-	info, err := mgr.GetDatabase(ctx, "content", "dev", nil)
+	info, err := mgr.GetDatabase(ctx, "content", "dev", "")
 	if err != nil {
 		t.Fatalf("GetDatabase: %v", err)
 	}

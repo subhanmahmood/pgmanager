@@ -41,6 +41,9 @@ export interface Project {
 export interface DatabaseInfo {
   project: string
   env: string
+  /** Separates instances within a keyed env: the PR number for `pr`, a label
+   *  for `scratch`. Absent for the singleton envs. */
+  key?: string
   pr_number?: number
   database_name: string
   user_name: string
@@ -60,8 +63,15 @@ export interface DatabaseSecret extends DatabaseInfo {
 
 export interface CreateDatabaseRequest {
   env: string
+  key?: string
   pr_number?: number
   extensions?: string[]
+  /** Initial lease, e.g. "14d". Omitted means the server's default. */
+  ttl?: string
+}
+
+export interface RenewDatabaseRequest {
+  ttl?: string
 }
 
 /** internal/api/auth_handlers.go — TokenResponse */
@@ -147,8 +157,16 @@ export interface CleanupResult {
 }
 
 /** Environments the server accepts (internal/project). */
-export const ENVIRONMENTS = ['dev', 'staging', 'prod', 'pr'] as const
+export const ENVIRONMENTS = ['dev', 'staging', 'prod', 'pr', 'scratch'] as const
 export type Environment = (typeof ENVIRONMENTS)[number]
+
+/** Envs that hold many databases and so require a key (internal/project —
+ *  keyedEnvs). The others are one per project. */
+export const KEYED_ENVIRONMENTS: readonly string[] = ['pr', 'scratch']
+
+export function isKeyedEnv(env: string): boolean {
+  return KEYED_ENVIRONMENTS.includes(env)
+}
 
 /** internal/db/explore.go — MaxRowLimit. The server silently caps above this. */
 export const MAX_ROW_LIMIT = 200

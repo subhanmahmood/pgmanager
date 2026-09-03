@@ -1,16 +1,23 @@
+import { isKeyedEnv } from './types'
 import type { DatabaseInfo } from './types'
 
-/** The API's URL segment for a database: "dev" or "pr_42". Feeds both routing
- *  and every database API path, so getting it wrong breaks the whole subtree. */
-export function envSegment(db: Pick<DatabaseInfo, 'env' | 'pr_number'>): string {
-  return db.pr_number ? `pr_${db.pr_number}` : db.env
+/** The API's URL segment for a database: "dev", "pr_42", "scratch_epic_231".
+ *  Feeds both routing and every database API path, so getting it wrong breaks
+ *  the whole subtree. */
+export function envSegment(db: Pick<DatabaseInfo, 'env' | 'key' | 'pr_number'>): string {
+  const key = db.key ?? (db.pr_number !== undefined ? String(db.pr_number) : '')
+  return key ? `${db.env}_${key}` : db.env
 }
 
-/** Inverse of envSegment, for reading a route param back. */
-export function parseEnvSegment(segment: string): { env: string; prNumber?: number } {
-  const m = /^pr_(\d+)$/.exec(segment)
-  if (m) return { env: 'pr', prNumber: Number(m[1]) }
-  return { env: segment }
+/** Inverse of envSegment, for reading a route param back. Env names carry no
+ *  underscore, so the first one separates the env from its key; a key may
+ *  contain further underscores and keeps them. */
+export function parseEnvSegment(segment: string): { env: string; key?: string } {
+  const cut = segment.indexOf('_')
+  if (cut === -1) return { env: segment }
+  const env = segment.slice(0, cut)
+  if (!isKeyedEnv(env)) return { env: segment }
+  return { env, key: segment.slice(cut + 1) }
 }
 
 export function fmtDate(s?: string | null): string {

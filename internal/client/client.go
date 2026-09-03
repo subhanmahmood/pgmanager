@@ -20,6 +20,7 @@ type Project struct {
 type Database struct {
 	Project      string     `json:"project"`
 	Env          string     `json:"env"`
+	Key          string     `json:"key,omitempty"`
 	PRNumber     *int       `json:"pr_number,omitempty"`
 	DatabaseName string     `json:"database_name"`
 	UserName     string     `json:"user_name"`
@@ -58,15 +59,17 @@ type Client interface {
 
 	// Databases. extensions, if non-empty, lists Postgres extensions to
 	// install in the new database (e.g., []string{"vector"}).
-	CreateDatabase(ctx context.Context, project, env string, prNumber *int, extensions []string) (*Database, error)
-	GetDatabase(ctx context.Context, project, env string, prNumber *int) (*Database, error)
-	GetDatabaseCredentials(ctx context.Context, project, env string, prNumber *int) (*Database, error)
+	CreateDatabase(ctx context.Context, project, env, key string, extensions []string, ttl string) (*Database, error)
+	GetDatabase(ctx context.Context, project, env, key string) (*Database, error)
+	GetDatabaseCredentials(ctx context.Context, project, env, key string) (*Database, error)
+	// RenewDatabase pushes the database's lease out by ttl from now.
+	RenewDatabase(ctx context.Context, project, env, key, ttl string) (*Database, error)
 	ListDatabases(ctx context.Context, project string) ([]Database, error)
 	// RotatePassword issues a new password for the database's role and
 	// returns the updated credentials. terminate additionally kills open
 	// connections, so holders of the old password must reconnect.
-	RotatePassword(ctx context.Context, project, env string, prNumber *int, terminate bool) (*Database, error)
-	DeleteDatabase(ctx context.Context, project, env string, prNumber *int) error
+	RotatePassword(ctx context.Context, project, env, key string, terminate bool) (*Database, error)
+	DeleteDatabase(ctx context.Context, project, env, key string) error
 
 	// Cleanup.
 	Cleanup(ctx context.Context, olderThan time.Duration) ([]string, error)

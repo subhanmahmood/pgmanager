@@ -117,6 +117,7 @@ func (s *Server) buildRouter(authMW func(http.Handler) http.Handler) *chi.Mux {
 		r.Get("/projects/{name}/databases/{env}", s.getDatabase)
 		r.Get("/projects/{name}/databases/{env}/credentials", s.getDatabaseCredentials)
 		r.Post("/projects/{name}/databases/{env}/rotate", s.rotateDatabasePassword)
+		r.Post("/projects/{name}/databases/{env}/renew", s.renewDatabase)
 		r.Delete("/projects/{name}/databases/{env}", s.deleteDatabase)
 
 		// Data explorer — browse and edit the contents of a managed database.

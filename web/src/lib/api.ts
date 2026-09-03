@@ -107,6 +107,10 @@ export const api = {
     request<DatabaseSecret>('POST', `/projects/${seg(project)}/databases/${seg(env)}/rotate`, {
       terminate,
     }),
+  renewDatabase: (project: string, env: string, ttl?: string) =>
+    request<DatabaseInfo>('POST', `/projects/${seg(project)}/databases/${seg(env)}/renew`, {
+      ttl,
+    }),
   deleteDatabase: (project: string, env: string) =>
     request<null>('DELETE', `/projects/${seg(project)}/databases/${seg(env)}`),
 

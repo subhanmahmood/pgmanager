@@ -11,14 +11,21 @@ import {
   MoreHorizontal,
   Plus,
   Table2,
+  TimerReset,
   Trash2,
   X,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { ENVIRONMENTS } from '@/lib/types'
+import { ENVIRONMENTS, isKeyedEnv } from '@/lib/types'
 import type { DatabaseInfo, DatabaseSecret } from '@/lib/types'
 import { envSegment, fmtDate, isExpired, relativeExpiry, relativePast } from '@/lib/format'
-import { useCreateDatabase, useDatabases, useDeleteDatabase, useDeleteProject } from '@/hooks/queries'
+import {
+  useCreateDatabase,
+  useDatabases,
+  useDeleteDatabase,
+  useDeleteProject,
+  useRenewDatabase,
+} from '@/hooks/queries'
 import { toastError } from '@/lib/query'
 import { PageHeader } from '@/components/page-header'
 import { DataTable, type ColumnDef } from '@/components/data-table'
@@ -70,12 +77,22 @@ const SUGGESTED_EXTENSIONS = ['uuid-ossp', 'pgcrypto', 'postgis', 'vector', 'cit
 const schema = z
   .object({
     env: z.enum(ENVIRONMENTS),
-    pr_number: z.string().optional(),
+    // One field for both keyed envs: a PR number is just a numeric key.
+    key: z.string().optional(),
+    ttl: z.string().optional(),
     extensions: z.array(z.string()),
   })
-  .refine((v) => v.env !== 'pr' || /^\d+$/.test(v.pr_number ?? ''), {
+  .refine((v) => v.env !== 'pr' || /^[1-9]\d*$/.test(v.key ?? ''), {
     message: 'A PR number is required',
-    path: ['pr_number'],
+    path: ['key'],
+  })
+  .refine((v) => v.env !== 'scratch' || /^[a-z][a-z0-9_]*$/.test(v.key ?? ''), {
+    message: 'Lowercase letters, numbers and underscores; must start with a letter',
+    path: ['key'],
+  })
+  .refine((v) => !v.ttl || /^\d+[hdw]$/.test(v.ttl), {
+    message: 'A duration like 14d, 48h or 2w',
+    path: ['ttl'],
   })
 
 type Values = z.infer<typeof schema>
@@ -86,6 +103,7 @@ export function ProjectDetailPage() {
 
   const { data: databases, isPending, error, refetch } = useDatabases(name)
   const createDatabase = useCreateDatabase(name)
+  const renewDatabase = useRenewDatabase(name)
   const deleteDatabase = useDeleteDatabase(name)
   const deleteProject = useDeleteProject()
 
@@ -97,7 +115,7 @@ export function ProjectDetailPage() {
 
   const form = useForm<Values>({
     resolver: zodResolver(schema),
-    defaultValues: { env: 'dev', pr_number: '', extensions: [] },
+    defaultValues: { env: 'dev', key: '', ttl: '', extensions: [] },
   })
   const env = form.watch('env')
   const extensions = form.watch('extensions')
@@ -110,9 +128,20 @@ export function ProjectDetailPage() {
   }
 
   const openCreate = () => {
-    form.reset({ env: 'dev', pr_number: '', extensions: [] })
+    form.reset({ env: 'dev', key: '', ttl: '', extensions: [] })
     setExtensionDraft('')
     setCreateOpen(true)
+  }
+
+  const renewLease = (db: DatabaseInfo) => {
+    renewDatabase.mutate(
+      { env: envSegment(db) },
+      {
+        onSuccess: (renewed) =>
+          toast.success(`${db.database_name} leased until ${fmtDate(renewed.expires_at)}`),
+        onError: toastError,
+      },
+    )
   }
 
   const copyConnectionString = async (db: DatabaseInfo) => {
@@ -214,6 +243,13 @@ export function ProjectDetailPage() {
               <Copy className="size-4" />
               Copy connection string
             </DropdownMenuItem>
+            {/* Only a leased database has an expiry to push out. */}
+            {db.expires_at && (
+              <DropdownMenuItem onSelect={() => renewLease(db)}>
+                <TimerReset className="size-4" />
+                Renew lease
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" onSelect={() => setToDelete(db)}>
               <Trash2 className="size-4" />
@@ -311,7 +347,8 @@ export function ProjectDetailPage() {
                 createDatabase.mutate(
                   {
                     env: v.env,
-                    pr_number: v.env === 'pr' ? Number(v.pr_number) : undefined,
+                    key: isKeyedEnv(v.env) ? v.key : undefined,
+                    ttl: isKeyedEnv(v.env) && v.ttl ? v.ttl : undefined,
                     extensions: v.extensions.length ? v.extensions : undefined,
                   },
                   {
@@ -352,30 +389,58 @@ export function ProjectDetailPage() {
                 )}
               />
 
-              {env === 'pr' && (
-                <FormField
-                  control={form.control}
-                  name="pr_number"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>PR number</FormLabel>
-                      <FormControl>
-                        <Input
-                          type="number"
-                          min={1}
-                          inputMode="numeric"
-                          className="font-mono"
-                          placeholder="42"
-                          {...field}
-                        />
-                      </FormControl>
-                      <FormDescription>
-                        PR databases expire automatically and are removed by cleanup.
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+              {isKeyedEnv(env) && (
+                <>
+                  <FormField
+                    control={form.control}
+                    name="key"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{env === 'pr' ? 'PR number' : 'Label'}</FormLabel>
+                        <FormControl>
+                          {env === 'pr' ? (
+                            <Input
+                              type="number"
+                              min={1}
+                              inputMode="numeric"
+                              className="font-mono"
+                              placeholder="42"
+                              {...field}
+                            />
+                          ) : (
+                            <Input className="font-mono" placeholder="epic_231" {...field} />
+                          )}
+                        </FormControl>
+                        <FormDescription>
+                          Names the database{' '}
+                          <span className="font-mono">
+                            {name}_{env}_{form.watch('key') || '…'}
+                          </span>
+                          .
+                        </FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={form.control}
+                    name="ttl"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Lease</FormLabel>
+                        <FormControl>
+                          <Input className="font-mono" placeholder="server default" {...field} />
+                        </FormControl>
+                        <FormDescription>
+                          Cleanup drops this database once the lease lapses. Renew it to keep it
+                          alive for as long as the work is.
+                        </FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                </>
               )}
 
               <FormField

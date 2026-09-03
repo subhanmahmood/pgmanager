@@ -107,7 +107,7 @@ func (s *MockStore) DeleteProject(ctx context.Context, name string) ([]Database,
 	return deleted, nil
 }
 
-func (s *MockStore) CreateDatabase(ctx context.Context, projectID int64, name, userName, password, env string, prNumber *int, expiresAt *time.Time) (*Database, error) {
+func (s *MockStore) CreateDatabase(ctx context.Context, projectID int64, name, userName, password, env, key string, expiresAt *time.Time) (*Database, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -118,7 +118,8 @@ func (s *MockStore) CreateDatabase(ctx context.Context, projectID int64, name, u
 		UserName:  userName,
 		Password:  password,
 		Env:       env,
-		PRNumber:  prNumber,
+		Key:       key,
+		PRNumber:  legacyPRNumber(env, key),
 		CreatedAt: time.Now(),
 		ExpiresAt: expiresAt,
 	}
@@ -127,17 +128,12 @@ func (s *MockStore) CreateDatabase(ctx context.Context, projectID int64, name, u
 	return db, nil
 }
 
-func (s *MockStore) GetDatabase(ctx context.Context, projectID int64, env string, prNumber *int) (*Database, error) {
+func (s *MockStore) GetDatabase(ctx context.Context, projectID int64, env, key string) (*Database, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, db := range s.databases {
-		if db.ProjectID == projectID && db.Env == env {
-			if prNumber == nil && db.PRNumber == nil {
-				return db, nil
-			}
-			if prNumber != nil && db.PRNumber != nil && *prNumber == *db.PRNumber {
-				return db, nil
-			}
+		if db.ProjectID == projectID && db.Env == env && db.Key == key {
+			return db, nil
 		}
 	}
 	return nil, nil
@@ -188,6 +184,18 @@ func (s *MockStore) SetDatabasePassword(ctx context.Context, name, password stri
 	return fmt.Errorf("database not found: %s", name)
 }
 
+func (s *MockStore) SetDatabaseExpiry(ctx context.Context, name string, expiresAt *time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, db := range s.databases {
+		if db.Name == name {
+			db.ExpiresAt = expiresAt
+			return nil
+		}
+	}
+	return fmt.Errorf("database not found: %s", name)
+}
+
 func (s *MockStore) DeleteDatabase(ctx context.Context, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -213,13 +221,13 @@ func (s *MockStore) GetExpiredDatabases(ctx context.Context) ([]Database, error)
 	return result, nil
 }
 
-func (s *MockStore) GetDatabasesOlderThan(ctx context.Context, env string, olderThan time.Duration) ([]Database, error) {
+func (s *MockStore) GetUnleasedDatabasesOlderThan(ctx context.Context, env string, olderThan time.Duration) ([]Database, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	cutoff := time.Now().Add(-olderThan)
 	var result []Database
 	for _, db := range s.databases {
-		if db.Env == env && db.CreatedAt.Before(cutoff) {
+		if db.Env == env && db.ExpiresAt == nil && db.CreatedAt.Before(cutoff) {
 			result = append(result, *db)
 		}
 	}
