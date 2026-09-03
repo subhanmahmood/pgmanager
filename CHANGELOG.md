@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/subhanmahmood/pgmanager/compare/v0.2.4...v0.2.5) (2026-09-03)
+
+
+### Features
+
+* lease keyed databases and add a scratch env ([#43](https://github.com/subhanmahmood/pgmanager/issues/43)) ([5e2f55f](https://github.com/subhanmahmood/pgmanager/commit/5e2f55f9aa67531a572870c313ea84b01fbf1e81))
+
 ## [0.2.4](https://github.com/subhanmahmood/pgmanager/compare/v0.2.3...v0.2.4) (2026-07-30)
 
 
