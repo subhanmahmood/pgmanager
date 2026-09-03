@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -185,5 +186,76 @@ func TestParseEnvParamKeyedEnvs(t *testing.T) {
 		if env != c.wantEnv || key != c.wantKey {
 			t.Errorf("parseEnvParam(%q) = (%q, %q), want (%q, %q)", c.segment, env, key, c.wantEnv, c.wantKey)
 		}
+	}
+}
+
+// TestListReturnsTheKey pins the finding that listDatabases built its response
+// without the key while every single-database handler included it. Key carries
+// `omitempty` and a scratch database has no pr_number to fall back on, so the
+// field vanished from the list payload entirely and the admin UI could not
+// address the row it had just listed.
+func TestListReturnsTheKey(t *testing.T) {
+	fx := setupTestServer(t)
+	defer fx.cleanup()
+
+	soon := time.Now().Add(time.Hour)
+	seedScratch(t, fx, "myapp", "epic_231", &soon)
+
+	req := httptest.NewRequest("GET", "/api/projects/myapp/databases", nil)
+	w := httptest.NewRecorder()
+	fx.server.Router().ServeHTTP(w, authed(req, fx.adminToken))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var resp []DatabaseInfoResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp) != 1 {
+		t.Fatalf("got %d databases, want 1", len(resp))
+	}
+	if resp[0].Key != "epic_231" {
+		t.Errorf("key = %q, want epic_231", resp[0].Key)
+	}
+}
+
+// TestCreateCapsPRKeySentAsKey pins the finding that the MaxPRNumber bound was
+// only applied to the legacy pr_number field. A client sending the same number
+// as `key` skipped the cap, and parseEnvParam — which every other endpoint uses
+// — then refused the resulting pr_<n> segment, so the database existed but
+// nothing could read, renew, or rotate it.
+//
+// The project is seeded first and the assertion is on the error text, not just
+// the status: an unseeded project answers 400 with "project not found", which
+// is the same status for an unrelated reason and hides a missing cap entirely.
+func TestCreateCapsPRKeySentAsKey(t *testing.T) {
+	fx := setupTestServer(t)
+	defer fx.cleanup()
+	if _, err := fx.store.CreateProject(context.Background(), "myapp"); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	cases := []struct {
+		name, body string
+	}{
+		{"key past the cap", `{"env":"pr","key":"1000001"}`},
+		{"pr_number past the cap", `{"env":"pr","pr_number":1000001}`},
+		{"key not a number", `{"env":"pr","key":"abc"}`},
+		{"key not positive", `{"env":"pr","key":"0"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/api/projects/myapp/databases", jsonBody(c.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			fx.server.Router().ServeHTTP(w, authed(req, fx.adminToken))
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400, body = %s", w.Code, w.Body.String())
+			}
+			if body := w.Body.String(); !strings.Contains(body, "PR number") {
+				t.Errorf("rejected for the wrong reason: %s", body)
+			}
+		})
 	}
 }

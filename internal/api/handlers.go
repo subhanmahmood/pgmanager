@@ -224,6 +224,7 @@ func (s *Server) listDatabases(w http.ResponseWriter, r *http.Request) {
 		response[i] = DatabaseInfoResponse{
 			Project:      info.Project,
 			Env:          info.Env,
+			Key:          info.Key,
 			PRNumber:     info.PRNumber,
 			DatabaseName: info.DatabaseName,
 			UserName:     info.UserName,
@@ -248,20 +249,23 @@ func (s *Server) createDatabase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "env is required")
 		return
 	}
-	if req.PRNumber != nil {
-		if *req.PRNumber <= 0 {
-			writeError(w, http.StatusBadRequest, "PR number must be positive")
-			return
-		}
-		if *req.PRNumber > MaxPRNumber {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("PR number must be less than %d", MaxPRNumber))
-			return
-		}
-	}
 	// Key is the current field; pr_number is what older clients send.
 	key := req.Key
 	if key == "" && req.PRNumber != nil {
 		key = strconv.Itoa(*req.PRNumber)
+	}
+	// The API caps PR numbers where the CLI does not, because the number
+	// arrives from an untrusted request and ends up in an identifier. Cap the
+	// resolved key rather than req.PRNumber: a client sending `key` directly
+	// would otherwise create a pr database that parseEnvParam refuses to
+	// parse, leaving it unreachable by every other endpoint. An empty key
+	// falls through to ValidateKey, which says so more precisely.
+	if req.Env == "pr" && key != "" {
+		if n, err := strconv.Atoi(key); err != nil || n <= 0 || n > MaxPRNumber {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("PR number must be a positive integer below %d", MaxPRNumber))
+			return
+		}
 	}
 
 	var ttl *time.Duration
