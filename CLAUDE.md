@@ -247,9 +247,11 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 ### Key design rules
 
 - Project names: regex `^[a-z][a-z0-9_]*$`, length 2–32. Reserved: `postgres`, `template0`, `template1`, `admin`, `root`, `system`.
-- Environments: `prod`, `dev`, `staging`, `pr`.
-- Database naming: `{project}_{env}` or `{project}_pr_{number}`.
-- PR DBs get a TTL (default 7 days); `pgmanager cleanup` removes expired ones.
+- Environments: `prod`, `dev`, `staging`, `pr`, `scratch`. `prod`/`dev`/`staging` are singletons — one per project, permanent. `pr` and `scratch` are **keyed**: many per project, each identified by a key, each leased.
+- Keys: a PR number for `pr`, a label matching `^[a-z][a-z0-9_]*$` for `scratch`. Stored in `databases.instance_key`; `pr_number` is a legacy mirror kept populated for `pr` because the HTTP API and the admin UI still read it. `instance_key` is the authority.
+- Database naming: `{project}_{env}` for a singleton, `{project}_{env}_{key}` for a keyed one — so `myapp_pr_42`, `myapp_scratch_epic_231`. Create rejects a name whose `_user` role would exceed Postgres's 63-char identifier limit.
+- URL/CLI segment: `{env}_{key}`. Env names carry no underscore, so the *first* one separates env from key and the key keeps any later ones. `project.ParseEnv` is the single implementation; `api.parseEnvParam` wraps it only to add the `MaxPRNumber` bound on untrusted input.
+- **Leases are the only lifetime rule.** A keyed database gets `expires_at` at create (`--ttl`, else `cleanup.default_ttl`); `db renew` pushes it out. A singleton env refuses `--ttl` outright, because `db renew` refuses it too — accepting one would create a database with an expiry nothing could extend. `pgmanager cleanup` drops whatever has lapsed. The age sweep (`GetUnleasedDatabasesOlderThan`) exists only for rows predating leases — it is restricted to `expires_at IS NULL` and must stay that way. It previously ran unrestricted, which silently overrode a renewed lease and made a long-lived database impossible; `TestReapableRespectsTheLease` pins that.
 - Token format: `pgm_live_<32 url-safe bytes>`. Only SHA-256 stored. Display prefix is the first 16 chars.
 - SQL injection prevention everywhere via `pgx.Identifier{}.Sanitize()` and `quoteLiteral` for passwords.
 - DB passwords in metadata are AES-GCM encrypted; the key never lives in the DB.
@@ -264,6 +266,7 @@ Managed via `pgmanager login / logout / profile use / profile show`.
 - `project:<name>` — one project, all envs.
 - `project:<name>:env:<env>` — one project, one env (e.g. `dev`).
 - `project:<name>:pr:*` — one project, only PR DBs (the CI scope).
+- `project:<name>:env:scratch` — one project, only scratch DBs (the agent scope). This is why `scratch` is an env rather than a flag on create: scopes key on env, so the narrow token falls out for free.
 
 ## Testing patterns
 

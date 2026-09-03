@@ -42,6 +42,10 @@ func TestAuthorize(t *testing.T) {
 		{"project:myapp:pr:* denies dev", []string{"project:myapp:pr:*"}, ScopeRequest{Resource: "project", Project: "myapp", Env: "dev"}, true},
 		{"project:myapp:env:dev allows dev", []string{"project:myapp:env:dev"}, ScopeRequest{Resource: "project", Project: "myapp", Env: "dev"}, false},
 		{"project:myapp:env:dev denies prod", []string{"project:myapp:env:dev"}, ScopeRequest{Resource: "project", Project: "myapp", Env: "prod"}, true},
+		{"project:myapp:env:scratch allows scratch", []string{"project:myapp:env:scratch"}, ScopeRequest{Resource: "project", Project: "myapp", Env: "scratch"}, false},
+		{"project:myapp:env:scratch denies dev", []string{"project:myapp:env:scratch"}, ScopeRequest{Resource: "project", Project: "myapp", Env: "dev"}, true},
+		{"project:myapp:env:scratch denies pr", []string{"project:myapp:env:scratch"}, ScopeRequest{Resource: "project", Project: "myapp", Env: "pr", PR: 42}, true},
+		{"project:myapp:pr:* denies scratch", []string{"project:myapp:pr:*"}, ScopeRequest{Resource: "project", Project: "myapp", Env: "scratch"}, true},
 		{"empty scopes denies", []string{}, ScopeRequest{Resource: "project", Project: "x"}, true},
 		{"unknown scope denies", []string{"foo:bar"}, ScopeRequest{Resource: "project", Project: "x"}, true},
 	}
@@ -65,6 +69,7 @@ func TestValidateScopes(t *testing.T) {
 		{"project:myapp:env:dev"},
 		{"project:myapp:env:prod"},
 		{"project:*:env:staging"},
+		{"project:myapp:env:scratch"},
 	}
 	for _, scopes := range good {
 		if err := ValidateScopes(scopes); err != nil {

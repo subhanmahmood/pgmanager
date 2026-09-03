@@ -75,7 +75,7 @@ export function validateScope(scope: string): string | null {
   if (parts.length === 4) {
     if (!parts[1]) return `Invalid scope "${scope}"`
     if (parts[2] === 'env') {
-      return ['prod', 'dev', 'staging', 'pr'].includes(parts[3])
+      return ['prod', 'dev', 'staging', 'pr', 'scratch'].includes(parts[3])
         ? null
         : `Invalid env in scope "${scope}"`
     }

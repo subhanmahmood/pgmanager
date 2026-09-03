@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,8 +37,39 @@ var (
 		"dev":     true,
 		"staging": true,
 		"pr":      true,
+		"scratch": true,
 	}
+
+	// keyedEnvs hold more than one database, so each instance needs a key to
+	// tell it from its siblings: the PR number for "pr", a caller-chosen
+	// label for "scratch". The other envs are singletons per project.
+	keyedEnvs = map[string]bool{
+		"pr":      true,
+		"scratch": true,
+	}
+
+	// validKeyRegex matches a scratch key. Same shape as a project name, so
+	// the composed database name stays a plain Postgres identifier.
+	validKeyRegex = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 )
+
+// MaxIdentifierLen is Postgres's identifier limit. The database's own role is
+// named `<database>_user`, so a database name has to leave room for that
+// suffix or the role could not be created.
+const MaxIdentifierLen = 63
+
+// IsKeyedEnv reports whether an env holds more than one database, and so
+// requires a key.
+func IsKeyedEnv(env string) bool { return keyedEnvs[env] }
+
+// envLabel renders an env and key the way they appear in a database name and
+// in a URL path segment: "dev", "pr_42", "scratch_epic_231".
+func envLabel(env, key string) string {
+	if keyedEnvs[env] && key != "" {
+		return env + "_" + key
+	}
+	return env
+}
 
 // Manager handles project and database operations
 type Manager struct {
@@ -50,6 +82,7 @@ type Manager struct {
 type DatabaseInfo struct {
 	Project      string
 	Env          string
+	Key          string
 	PRNumber     *int
 	DatabaseName string
 	UserName     string
@@ -90,7 +123,7 @@ func ValidateName(name string) error {
 // ValidateEnv validates an environment name
 func ValidateEnv(env string) error {
 	if !validEnvs[env] {
-		return fmt.Errorf("invalid environment '%s', must be one of: prod, dev, staging, pr", env)
+		return fmt.Errorf("invalid environment '%s', must be one of: prod, dev, staging, pr, scratch", env)
 	}
 	return nil
 }
@@ -111,10 +144,36 @@ func ValidateExtensionName(name string) error {
 	return nil
 }
 
-// DatabaseName generates the database name for a project and environment
-func DatabaseName(project, env string, prNumber *int) string {
-	if env == "pr" && prNumber != nil {
-		return fmt.Sprintf("%s_pr_%d", project, *prNumber)
+// ValidateKey checks a database key against its env. A singleton env must have
+// no key; a keyed env must have one, shaped so the composed database name and
+// its role name are both valid Postgres identifiers.
+func ValidateKey(env, key string) error {
+	if !keyedEnvs[env] {
+		if key != "" {
+			return fmt.Errorf("env '%s' takes no key", env)
+		}
+		return nil
+	}
+	if key == "" {
+		return fmt.Errorf("env '%s' requires a key", env)
+	}
+	if env == "pr" {
+		n, err := strconv.Atoi(key)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("PR number must be a positive integer, got %q", key)
+		}
+		return nil
+	}
+	if !validKeyRegex.MatchString(key) {
+		return fmt.Errorf("invalid key %q (allowed: lowercase letters, numbers, underscore; must start with a letter)", key)
+	}
+	return nil
+}
+
+// DatabaseName generates the database name for a project, environment and key.
+func DatabaseName(project, env, key string) string {
+	if keyedEnvs[env] && key != "" {
+		return fmt.Sprintf("%s_%s_%s", project, env, key)
 	}
 	return fmt.Sprintf("%s_%s", project, env)
 }
@@ -174,13 +233,23 @@ func (m *Manager) DeleteProject(ctx context.Context, name string) error {
 // CreateDatabase creates a new database for a project. If extensions is
 // non-empty each name is installed into the new database (extensions
 // usually require superuser, so this runs as the admin connection).
-func (m *Manager) CreateDatabase(ctx context.Context, projectName, env string, prNumber *int, extensions []string) (*DatabaseInfo, error) {
+func (m *Manager) CreateDatabase(ctx context.Context, projectName, env, key string, extensions []string, ttl *time.Duration) (*DatabaseInfo, error) {
 	if err := ValidateEnv(env); err != nil {
 		return nil, err
 	}
-
-	if env == "pr" && prNumber == nil {
-		return nil, fmt.Errorf("PR number is required for PR databases")
+	if err := ValidateKey(env, key); err != nil {
+		return nil, err
+	}
+	if ttl != nil {
+		if *ttl <= 0 {
+			return nil, fmt.Errorf("ttl must be positive")
+		}
+		// Only keyed envs are leased. Accepting a ttl here would give a
+		// permanent database an expiry that RenewDatabase then refuses to
+		// extend — a database nothing could keep alive.
+		if !keyedEnvs[env] {
+			return nil, fmt.Errorf("env '%s' is permanent and takes no ttl", env)
+		}
 	}
 
 	for _, ext := range extensions {
@@ -199,22 +268,31 @@ func (m *Manager) CreateDatabase(ctx context.Context, projectName, env string, p
 	}
 
 	// Check if database already exists
-	existing, err := m.store.GetDatabase(ctx, project.ID, env, prNumber)
+	existing, err := m.store.GetDatabase(ctx, project.ID, env, key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check database: %w", err)
 	}
 	if existing != nil {
-		return nil, fmt.Errorf("database already exists for %s/%s", projectName, env)
+		return nil, fmt.Errorf("database already exists for %s/%s", projectName, envLabel(env, key))
 	}
 
 	// Generate names and password
-	dbName := DatabaseName(projectName, env, prNumber)
+	dbName := DatabaseName(projectName, env, key)
+	if len(UserName(dbName)) > MaxIdentifierLen {
+		return nil, fmt.Errorf("database name %q is too long once the _user role suffix is added (max %d)", dbName, MaxIdentifierLen)
+	}
 	userName := UserName(dbName)
 	password := db.GeneratePassword()
 
-	// Set TTL for PR databases
+	// Keyed envs are leased: they are created for something transient and are
+	// reaped when the lease lapses. An explicit --ttl overrides the default;
+	// the singleton envs stay permanent.
 	var expiresAt *time.Time
-	if env == "pr" {
+	switch {
+	case ttl != nil:
+		t := time.Now().Add(*ttl)
+		expiresAt = &t
+	case keyedEnvs[env]:
 		t := time.Now().Add(m.cfg.Cleanup.DefaultTTL)
 		expiresAt = &t
 	}
@@ -232,7 +310,7 @@ func (m *Manager) CreateDatabase(ctx context.Context, projectName, env string, p
 	}
 
 	// Store metadata
-	dbRecord, err := m.store.CreateDatabase(ctx, project.ID, dbName, userName, password, env, prNumber, expiresAt)
+	dbRecord, err := m.store.CreateDatabase(ctx, project.ID, dbName, userName, password, env, key, expiresAt)
 	if err != nil {
 		// Try to clean up the PostgreSQL database
 		_ = m.pg.DropDatabase(ctx, dbName, userName)
@@ -244,7 +322,8 @@ func (m *Manager) CreateDatabase(ctx context.Context, projectName, env string, p
 	return &DatabaseInfo{
 		Project:      projectName,
 		Env:          env,
-		PRNumber:     prNumber,
+		Key:          key,
+		PRNumber:     dbRecord.PRNumber,
 		DatabaseName: dbName,
 		UserName:     userName,
 		Password:     password,
@@ -257,8 +336,11 @@ func (m *Manager) CreateDatabase(ctx context.Context, projectName, env string, p
 }
 
 // GetDatabase returns information about a database
-func (m *Manager) GetDatabase(ctx context.Context, projectName, env string, prNumber *int) (*DatabaseInfo, error) {
+func (m *Manager) GetDatabase(ctx context.Context, projectName, env, key string) (*DatabaseInfo, error) {
 	if err := ValidateEnv(env); err != nil {
+		return nil, err
+	}
+	if err := ValidateKey(env, key); err != nil {
 		return nil, err
 	}
 
@@ -272,16 +354,12 @@ func (m *Manager) GetDatabase(ctx context.Context, projectName, env string, prNu
 	}
 
 	// Get database
-	dbRecord, err := m.store.GetDatabase(ctx, project.ID, env, prNumber)
+	dbRecord, err := m.store.GetDatabase(ctx, project.ID, env, key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get database: %w", err)
 	}
 	if dbRecord == nil {
-		envStr := env
-		if prNumber != nil {
-			envStr = fmt.Sprintf("pr_%d", *prNumber)
-		}
-		return nil, fmt.Errorf("database not found for %s/%s", projectName, envStr)
+		return nil, fmt.Errorf("database not found for %s/%s", projectName, envLabel(env, key))
 	}
 
 	host := m.cfg.Postgres.EffectiveHost()
@@ -289,6 +367,7 @@ func (m *Manager) GetDatabase(ctx context.Context, projectName, env string, prNu
 	return &DatabaseInfo{
 		Project:      projectName,
 		Env:          env,
+		Key:          dbRecord.Key,
 		PRNumber:     dbRecord.PRNumber,
 		DatabaseName: dbRecord.Name,
 		UserName:     dbRecord.UserName,
@@ -343,6 +422,7 @@ func (m *Manager) ListDatabases(ctx context.Context, projectName string) ([]Data
 		result = append(result, DatabaseInfo{
 			Project:      projectNameStr,
 			Env:          dbItem.Env,
+			Key:          dbItem.Key,
 			PRNumber:     dbItem.PRNumber,
 			DatabaseName: dbItem.Name,
 			UserName:     dbItem.UserName,
@@ -362,8 +442,11 @@ func (m *Manager) ListDatabases(ctx context.Context, projectName string) ([]Data
 // it in Postgres, and stores it. Returns the database info carrying the new
 // password. If terminate is true, existing backends on the database are killed
 // so clients still holding the old credential are forced to reconnect.
-func (m *Manager) RotatePassword(ctx context.Context, projectName, env string, prNumber *int, terminate bool) (*DatabaseInfo, error) {
+func (m *Manager) RotatePassword(ctx context.Context, projectName, env, key string, terminate bool) (*DatabaseInfo, error) {
 	if err := ValidateEnv(env); err != nil {
+		return nil, err
+	}
+	if err := ValidateKey(env, key); err != nil {
 		return nil, err
 	}
 
@@ -375,16 +458,12 @@ func (m *Manager) RotatePassword(ctx context.Context, projectName, env string, p
 		return nil, fmt.Errorf("project '%s' not found", projectName)
 	}
 
-	dbRecord, err := m.store.GetDatabase(ctx, project.ID, env, prNumber)
+	dbRecord, err := m.store.GetDatabase(ctx, project.ID, env, key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get database: %w", err)
 	}
 	if dbRecord == nil {
-		envStr := env
-		if prNumber != nil {
-			envStr = fmt.Sprintf("pr_%d", *prNumber)
-		}
-		return nil, fmt.Errorf("database not found for %s/%s", projectName, envStr)
+		return nil, fmt.Errorf("database not found for %s/%s", projectName, envLabel(env, key))
 	}
 
 	password := db.GeneratePassword()
@@ -411,6 +490,7 @@ func (m *Manager) RotatePassword(ctx context.Context, projectName, env string, p
 	return &DatabaseInfo{
 		Project:      projectName,
 		Env:          env,
+		Key:          dbRecord.Key,
 		PRNumber:     dbRecord.PRNumber,
 		DatabaseName: dbRecord.Name,
 		UserName:     dbRecord.UserName,
@@ -424,8 +504,11 @@ func (m *Manager) RotatePassword(ctx context.Context, projectName, env string, p
 }
 
 // DeleteDatabase deletes a database
-func (m *Manager) DeleteDatabase(ctx context.Context, projectName, env string, prNumber *int) error {
+func (m *Manager) DeleteDatabase(ctx context.Context, projectName, env, key string) error {
 	if err := ValidateEnv(env); err != nil {
+		return err
+	}
+	if err := ValidateKey(env, key); err != nil {
 		return err
 	}
 
@@ -439,7 +522,7 @@ func (m *Manager) DeleteDatabase(ctx context.Context, projectName, env string, p
 	}
 
 	// Get database
-	dbRecord, err := m.store.GetDatabase(ctx, project.ID, env, prNumber)
+	dbRecord, err := m.store.GetDatabase(ctx, project.ID, env, key)
 	if err != nil {
 		return fmt.Errorf("failed to get database: %w", err)
 	}
@@ -460,29 +543,74 @@ func (m *Manager) DeleteDatabase(ctx context.Context, projectName, env string, p
 	return nil
 }
 
-// Cleanup removes expired and old PR databases
-func (m *Manager) Cleanup(ctx context.Context, olderThan time.Duration) ([]string, error) {
-	var deleted []string
-
-	// Get expired databases
+// reapable is the set Cleanup will drop, keyed by database name. It is split
+// out from Cleanup so the selection rule can be tested without a Postgres to
+// drop anything in.
+func (m *Manager) reapable(ctx context.Context, olderThan time.Duration) (map[string]meta.Database, error) {
 	expired, err := m.store.GetExpiredDatabases(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get expired databases: %w", err)
 	}
 
-	// Get old PR databases
-	oldPR, err := m.store.GetDatabasesOlderThan(ctx, "pr", olderThan)
+	unleased, err := m.store.GetUnleasedDatabasesOlderThan(ctx, "pr", olderThan)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get old PR databases: %w", err)
+		return nil, fmt.Errorf("failed to get unleased PR databases: %w", err)
 	}
 
-	// Combine and deduplicate
-	toDelete := make(map[string]meta.Database)
+	toDelete := make(map[string]meta.Database, len(expired)+len(unleased))
 	for _, db := range expired {
 		toDelete[db.Name] = db
 	}
-	for _, db := range oldPR {
+	for _, db := range unleased {
 		toDelete[db.Name] = db
+	}
+	return toDelete, nil
+}
+
+// RenewDatabase pushes a database's lease out by ttl from now, so a database
+// that is still in use is never reaped. Renewing a permanent database (one of
+// the singleton envs) is refused rather than silently giving it an expiry.
+func (m *Manager) RenewDatabase(ctx context.Context, projectName, env, key string, ttl time.Duration) (*DatabaseInfo, error) {
+	if err := ValidateEnv(env); err != nil {
+		return nil, err
+	}
+	if err := ValidateKey(env, key); err != nil {
+		return nil, err
+	}
+	if ttl <= 0 {
+		return nil, fmt.Errorf("ttl must be positive")
+	}
+	if !keyedEnvs[env] {
+		return nil, fmt.Errorf("env '%s' has no lease to renew", env)
+	}
+
+	info, err := m.GetDatabase(ctx, projectName, env, key)
+	if err != nil {
+		return nil, err
+	}
+
+	expiresAt := time.Now().Add(ttl)
+	if err := m.store.SetDatabaseExpiry(ctx, info.DatabaseName, &expiresAt); err != nil {
+		return nil, fmt.Errorf("failed to renew lease: %w", err)
+	}
+	info.ExpiresAt = &expiresAt
+	return info, nil
+}
+
+// Cleanup drops every database whose lease has lapsed.
+//
+// The lease (ExpiresAt) is the only lifetime rule. It used to be joined with a
+// second one — any PR database older than olderThan, whatever its expiry —
+// which silently overrode a renewed lease and made a longer-lived database
+// impossible. That sweep now only reaches rows carrying no lease at all, which
+// means rows written before leases were set at create time; everything created
+// since expires on its own terms and can be renewed.
+func (m *Manager) Cleanup(ctx context.Context, olderThan time.Duration) ([]string, error) {
+	var deleted []string
+
+	toDelete, err := m.reapable(ctx, olderThan)
+	if err != nil {
+		return nil, err
 	}
 
 	// Delete each database
@@ -503,14 +631,18 @@ func (m *Manager) Cleanup(ctx context.Context, olderThan time.Duration) ([]strin
 	return deleted, nil
 }
 
-// ParseEnv parses an environment string which may include a PR number
-func ParseEnv(envStr string) (env string, prNumber *int, err error) {
-	if strings.HasPrefix(envStr, "pr_") {
-		var num int
-		if _, err := fmt.Sscanf(envStr, "pr_%d", &num); err != nil {
-			return "", nil, fmt.Errorf("invalid PR environment format, expected pr_<number>")
-		}
-		return "pr", &num, nil
+// ParseEnv splits a database's env segment into its env and key. Keyed envs
+// carry their key after an underscore — "pr_42", "scratch_epic_231" — and env
+// names contain no underscore, so the first one is the separator.
+func ParseEnv(segment string) (env, key string, err error) {
+	env, key, found := strings.Cut(segment, "_")
+	if !found || !keyedEnvs[env] {
+		// Not a keyed segment at all: the whole thing is the env. Whether it
+		// is a *valid* env is ValidateEnv's call, not this one's.
+		return segment, "", nil
 	}
-	return envStr, nil, nil
+	if err := ValidateKey(env, key); err != nil {
+		return "", "", err
+	}
+	return env, key, nil
 }

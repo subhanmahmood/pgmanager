@@ -21,9 +21,16 @@ type Database struct {
 	Name      string
 	UserName  string
 	Password  string
-	Env       string // prod, dev, staging, pr
-	PRNumber  *int   // only set for PR databases
+	Env       string // prod, dev, staging, pr, scratch
+	// Key separates instances within a keyed env: the PR number for "pr",
+	// a caller-chosen label for "scratch". Empty for the singleton envs.
+	Key string
+	// PRNumber mirrors Key for env "pr". It is kept so API clients and the
+	// admin UI that predate Key keep working; Key is the authority.
+	PRNumber  *int
 	CreatedAt time.Time
+	// ExpiresAt is the database's lease. Non-nil means cleanup will drop it
+	// once it passes; renewing pushes it out. Nil means permanent.
 	ExpiresAt *time.Time
 }
 
@@ -141,19 +148,25 @@ type Store interface {
 	DeleteProject(ctx context.Context, name string) ([]Database, error)
 
 	// Database operations.
-	CreateDatabase(ctx context.Context, projectID int64, name, userName, password, env string, prNumber *int, expiresAt *time.Time) (*Database, error)
-	GetDatabase(ctx context.Context, projectID int64, env string, prNumber *int) (*Database, error)
+	CreateDatabase(ctx context.Context, projectID int64, name, userName, password, env, key string, expiresAt *time.Time) (*Database, error)
+	GetDatabase(ctx context.Context, projectID int64, env, key string) (*Database, error)
 	GetDatabaseByName(ctx context.Context, name string) (*Database, error)
 	ListDatabases(ctx context.Context, projectID int64) ([]Database, error)
 	ListAllDatabases(ctx context.Context) ([]Database, error)
 	// SetDatabasePassword replaces the stored (encrypted) password for a
 	// database. Used by password rotation.
 	SetDatabasePassword(ctx context.Context, name, password string) error
+	// SetDatabaseExpiry replaces the database's lease. A nil expiry makes it
+	// permanent.
+	SetDatabaseExpiry(ctx context.Context, name string, expiresAt *time.Time) error
 	DeleteDatabase(ctx context.Context, name string) error
 
 	// Cleanup operations.
 	GetExpiredDatabases(ctx context.Context) ([]Database, error)
-	GetDatabasesOlderThan(ctx context.Context, env string, olderThan time.Duration) ([]Database, error)
+	// GetUnleasedDatabasesOlderThan finds databases in an env that carry no
+	// lease at all — rows written before leases were set at create time.
+	// Everything created since has an ExpiresAt and is reaped by that alone.
+	GetUnleasedDatabasesOlderThan(ctx context.Context, env string, olderThan time.Duration) ([]Database, error)
 
 	// Token operations.
 	CreateToken(ctx context.Context, t *Token) error

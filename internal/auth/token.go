@@ -59,8 +59,8 @@ type ScopeRequest struct {
 	Resource string
 	// Project is the project name (empty for resource="token" or fleet-wide ops).
 	Project string
-	// Env is the database environment ("prod"/"dev"/"staging"/"pr"); empty
-	// for project-level actions.
+	// Env is the database environment ("prod"/"dev"/"staging"/"pr"/"scratch");
+	// empty for project-level actions.
 	Env string
 	// PR is the PR number (only set when Env is "pr").
 	PR int
@@ -78,6 +78,9 @@ var ErrScope = errors.New("token does not have required scope")
 //	project:<name>              - one project, any env
 //	project:<name>:pr:*         - one project, only PR DBs
 //	project:<name>:env:<env>    - one project, one specific env
+//
+// `project:<name>:env:scratch` is the scope to hand an agent: it can create and
+// drop its own scratch databases and cannot reach dev, prod, or CI's PR ones.
 func Authorize(held []string, req ScopeRequest) error {
 	for _, s := range held {
 		if scopeAllows(s, req) {
@@ -149,7 +152,7 @@ func ValidateScopes(scopes []string) error {
 			}
 			if parts[2] == "env" {
 				switch parts[3] {
-				case "prod", "dev", "staging", "pr":
+				case "prod", "dev", "staging", "pr", "scratch":
 				default:
 					return fmt.Errorf("invalid env in scope %q", s)
 				}

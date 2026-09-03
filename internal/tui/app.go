@@ -88,9 +88,9 @@ func loadDatabases(c client.Client, projectName string) tea.Cmd {
 	}
 }
 
-func loadCredentials(c client.Client, projectName, env string, prNumber *int) tea.Cmd {
+func loadCredentials(c client.Client, projectName, env, key string) tea.Cmd {
 	return func() tea.Msg {
-		info, err := c.GetDatabaseCredentials(context.Background(), projectName, env, prNumber)
+		info, err := c.GetDatabaseCredentials(context.Background(), projectName, env, key)
 		if err != nil {
 			return errMsg(err)
 		}
@@ -169,7 +169,7 @@ func (m model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "p":
 		// Fetch credentials for the currently selected database.
 		if m.currentView == viewDatabaseInfo && m.selectedDB != nil {
-			return m, loadCredentials(m.c, m.selectedDB.Project, m.selectedDB.Env, m.selectedDB.PRNumber)
+			return m, loadCredentials(m.c, m.selectedDB.Project, m.selectedDB.Env, m.selectedDB.Key)
 		}
 
 	case "esc", "b":
@@ -297,8 +297,8 @@ func (m model) renderDatabasesView() string {
 			style = selectedStyle
 		}
 		env := db.Env
-		if db.PRNumber != nil {
-			env = fmt.Sprintf("pr_%d", *db.PRNumber)
+		if db.Key != "" {
+			env = db.Env + "_" + db.Key
 		}
 		line := fmt.Sprintf("%s%-25s %-10s %s", cursor, db.DatabaseName, env, db.CreatedAt.Format("2006-01-02"))
 		s.WriteString(style.Render(line))

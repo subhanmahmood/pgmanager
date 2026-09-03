@@ -7,7 +7,6 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
-	"pgmanager/internal/auth"
 	"pgmanager/internal/db"
 )
 
@@ -18,21 +17,17 @@ import (
 
 // exploreTarget resolves the project/env path params and enforces scope. It
 // returns false if it has already written a response.
-func exploreTarget(w http.ResponseWriter, r *http.Request) (projectName, env string, prNumber *int, ok bool) {
+func exploreTarget(w http.ResponseWriter, r *http.Request) (projectName, env, key string, ok bool) {
 	projectName = chi.URLParam(r, "name")
-	prNumber, env, err := parseEnvParam(chi.URLParam(r, "env"))
+	key, env, err := parseEnvParam(chi.URLParam(r, "env"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
-		return "", "", nil, false
+		return "", "", "", false
 	}
-	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: env}
-	if prNumber != nil {
-		scopeReq.PR = *prNumber
+	if !requireScope(w, r, scopeFor(projectName, env, key)) {
+		return "", "", "", false
 	}
-	if !requireScope(w, r, scopeReq) {
-		return "", "", nil, false
-	}
-	return projectName, env, prNumber, true
+	return projectName, env, key, true
 }
 
 // tableParams pulls the schema and table out of the request. Schema is a query
@@ -70,11 +65,11 @@ type tablesResponse struct {
 }
 
 func (s *Server) listTables(w http.ResponseWriter, r *http.Request) {
-	projectName, env, prNumber, ok := exploreTarget(w, r)
+	projectName, env, key, ok := exploreTarget(w, r)
 	if !ok {
 		return
 	}
-	tables, err := s.mgr.ListTables(r.Context(), projectName, env, prNumber)
+	tables, err := s.mgr.ListTables(r.Context(), projectName, env, key)
 	if err != nil {
 		writeExploreError(w, "list tables", err)
 		return
@@ -83,7 +78,7 @@ func (s *Server) listTables(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listRows(w http.ResponseWriter, r *http.Request) {
-	projectName, env, prNumber, ok := exploreTarget(w, r)
+	projectName, env, key, ok := exploreTarget(w, r)
 	if !ok {
 		return
 	}
@@ -91,7 +86,7 @@ func (s *Server) listRows(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 
-	page, err := s.mgr.SelectRows(r.Context(), projectName, env, prNumber, schema, table, limit, offset)
+	page, err := s.mgr.SelectRows(r.Context(), projectName, env, key, schema, table, limit, offset)
 	if err != nil {
 		writeExploreError(w, "select rows", err)
 		return
@@ -100,7 +95,7 @@ func (s *Server) listRows(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createRow(w http.ResponseWriter, r *http.Request) {
-	projectName, env, prNumber, ok := exploreTarget(w, r)
+	projectName, env, key, ok := exploreTarget(w, r)
 	if !ok {
 		return
 	}
@@ -112,7 +107,7 @@ func (s *Server) createRow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	row, err := s.mgr.InsertRow(r.Context(), projectName, env, prNumber, schema, table, req.Values)
+	row, err := s.mgr.InsertRow(r.Context(), projectName, env, key, schema, table, req.Values)
 	if err != nil {
 		writeExploreError(w, "insert row", err)
 		return
@@ -121,7 +116,7 @@ func (s *Server) createRow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateRow(w http.ResponseWriter, r *http.Request) {
-	projectName, env, prNumber, ok := exploreTarget(w, r)
+	projectName, env, key, ok := exploreTarget(w, r)
 	if !ok {
 		return
 	}
@@ -137,7 +132,7 @@ func (s *Server) updateRow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	row, err := s.mgr.UpdateRow(r.Context(), projectName, env, prNumber, schema, table, req.Key, req.Values)
+	row, err := s.mgr.UpdateRow(r.Context(), projectName, env, key, schema, table, req.Key, req.Values)
 	if err != nil {
 		writeExploreError(w, "update row", err)
 		return
@@ -146,7 +141,7 @@ func (s *Server) updateRow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteRow(w http.ResponseWriter, r *http.Request) {
-	projectName, env, prNumber, ok := exploreTarget(w, r)
+	projectName, env, key, ok := exploreTarget(w, r)
 	if !ok {
 		return
 	}
@@ -162,7 +157,7 @@ func (s *Server) deleteRow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.mgr.DeleteRow(r.Context(), projectName, env, prNumber, schema, table, req.Key); err != nil {
+	if err := s.mgr.DeleteRow(r.Context(), projectName, env, key, schema, table, req.Key); err != nil {
 		writeExploreError(w, "delete row", err)
 		return
 	}

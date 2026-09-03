@@ -115,6 +115,18 @@ export function useCreateDatabase(project: string) {
   })
 }
 
+export function useRenewDatabase(project: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ env, ttl }: { env: string; ttl?: string }) =>
+      api.renewDatabase(project, env, ttl),
+    onSuccess: (_data, { env }) => {
+      qc.invalidateQueries({ queryKey: keys.databases(project) })
+      qc.invalidateQueries({ queryKey: keys.database(project, env) })
+    },
+  })
+}
+
 export function useDeleteDatabase(project: string) {
   const qc = useQueryClient()
   return useMutation({

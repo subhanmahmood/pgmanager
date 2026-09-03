@@ -1,6 +1,6 @@
 # pgmanager
 
-A small Go service + CLI for creating, listing, and deleting PostgreSQL databases per project. Built for the case where you want isolated databases per environment (`prod`, `dev`, `staging`) plus ephemeral PR databases for CI — without handing Postgres credentials to laptops or pipelines.
+A small Go service + CLI for creating, listing, and deleting PostgreSQL databases per project. Built for the case where you want isolated databases per environment (`prod`, `dev`, `staging`) plus leased, throwaway ones — a database per CI pull request, or a scratch database an agent or a long-running branch keeps alive — without handing Postgres credentials to laptops or pipelines.
 
 ## What you actually run
 
@@ -38,6 +38,24 @@ pgmanager project create myapp
 pgmanager db create myapp dev
 pgmanager db credentials myapp dev   # shows the connection string
 ```
+
+## Permanent and leased databases
+
+`prod`, `dev` and `staging` are **singleton** envs: one database per project, permanent, deleted only when you say so.
+
+`pr` and `scratch` are **keyed** envs: they hold many databases, so each one carries a key that separates it from its siblings, and each one is **leased** — it exists until its expiry passes, and `pgmanager cleanup` drops it once it does.
+
+```bash
+pgmanager db create myapp pr 42                        # myapp_pr_42, default lease
+pgmanager db create myapp scratch epic_231 --ttl 14d   # myapp_scratch_epic_231
+pgmanager db renew  myapp scratch epic_231 --ttl 14d   # still needed — push it out
+```
+
+A PR key is the PR number. A scratch key is a label you choose (`^[a-z][a-z0-9_]*$`), so the database name stays a plain Postgres identifier.
+
+Renewing is what makes a long-lived throwaway database safe. Call it from whatever drives the work — a CI job, an agent's tick loop — and the database lives exactly as long as something keeps saying it is still needed. Stop calling it and it reaps itself. That is strictly better than guessing a TTL up front: you never have to predict how long the work will take, and you never leak a database because the work was abandoned.
+
+`db list` shows every lease in an `EXPIRES` column, so nothing is on a clock you cannot see.
 
 `login` runs a device authorization, the same shape as `gh auth login`: the CLI
 prints a one-time code, you approve it from the admin UI in a browser that is
@@ -246,9 +264,12 @@ pgmanager auth devices             List devices awaiting authorization
 pgmanager auth approve <code>      Approve a device and mint its token
 pgmanager auth deny <code>         Reject a device
 pgmanager project create|list|delete
-pgmanager db create|list|info|credentials|delete
+pgmanager db create|list|info|credentials|renew|delete
                                    db create accepts -x/--extension (repeatable)
-pgmanager cleanup --older-than 7d  Delete expired PR DBs
+                                   and --ttl for a keyed database's lease
+pgmanager db renew <p> <env> <key> --ttl 14d
+                                   Push a lease out so cleanup leaves it alone
+pgmanager cleanup --older-than 7d  Drop databases whose lease has lapsed
 pgmanager tui                      Interactive terminal UI
 pgmanager keygen                   New 32-byte base64 encryption key
 pgmanager update                   Self-update binary
@@ -268,6 +289,7 @@ Add `--json` to any read command for machine-parseable output. `--profile <name>
 | `project:<name>` | One project, all environments |
 | `project:<name>:env:<env>` | One project, one specific environment |
 | `project:<name>:pr:*` | One project, PR databases only (the CI scope) |
+| `project:<name>:env:scratch` | One project, scratch databases only (the agent scope) |
 
 Plaintext tokens are returned **once** at creation; the Server stores only their SHA-256 plus a 16-char display prefix.
 

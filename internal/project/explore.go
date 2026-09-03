@@ -11,13 +11,13 @@ import (
 // never an arbitrary name — and the connection is made with that database's
 // own credentials rather than the admin role.
 
-func (m *Manager) explorerTarget(ctx context.Context, projectName, env string, prNumber *int) (*DatabaseInfo, error) {
-	return m.GetDatabase(ctx, projectName, env, prNumber)
+func (m *Manager) explorerTarget(ctx context.Context, projectName, env, dbKey string) (*DatabaseInfo, error) {
+	return m.GetDatabase(ctx, projectName, env, dbKey)
 }
 
 // ListTables returns the user tables in a managed database.
-func (m *Manager) ListTables(ctx context.Context, projectName, env string, prNumber *int) ([]db.Table, error) {
-	info, err := m.explorerTarget(ctx, projectName, env, prNumber)
+func (m *Manager) ListTables(ctx context.Context, projectName, env, dbKey string) ([]db.Table, error) {
+	info, err := m.explorerTarget(ctx, projectName, env, dbKey)
 	if err != nil {
 		return nil, err
 	}
@@ -25,8 +25,8 @@ func (m *Manager) ListTables(ctx context.Context, projectName, env string, prNum
 }
 
 // DescribeTable returns the columns of one table in a managed database.
-func (m *Manager) DescribeTable(ctx context.Context, projectName, env string, prNumber *int, schema, table string) ([]db.Column, error) {
-	info, err := m.explorerTarget(ctx, projectName, env, prNumber)
+func (m *Manager) DescribeTable(ctx context.Context, projectName, env, dbKey string, schema, table string) ([]db.Column, error) {
+	info, err := m.explorerTarget(ctx, projectName, env, dbKey)
 	if err != nil {
 		return nil, err
 	}
@@ -34,8 +34,8 @@ func (m *Manager) DescribeTable(ctx context.Context, projectName, env string, pr
 }
 
 // SelectRows returns a page of rows from one table.
-func (m *Manager) SelectRows(ctx context.Context, projectName, env string, prNumber *int, schema, table string, limit, offset int) (*db.RowPage, error) {
-	info, err := m.explorerTarget(ctx, projectName, env, prNumber)
+func (m *Manager) SelectRows(ctx context.Context, projectName, env, dbKey string, schema, table string, limit, offset int) (*db.RowPage, error) {
+	info, err := m.explorerTarget(ctx, projectName, env, dbKey)
 	if err != nil {
 		return nil, err
 	}
@@ -43,8 +43,8 @@ func (m *Manager) SelectRows(ctx context.Context, projectName, env string, prNum
 }
 
 // InsertRow inserts a row into one table.
-func (m *Manager) InsertRow(ctx context.Context, projectName, env string, prNumber *int, schema, table string, values map[string]any) (db.Row, error) {
-	info, err := m.explorerTarget(ctx, projectName, env, prNumber)
+func (m *Manager) InsertRow(ctx context.Context, projectName, env, dbKey string, schema, table string, values map[string]any) (db.Row, error) {
+	info, err := m.explorerTarget(ctx, projectName, env, dbKey)
 	if err != nil {
 		return nil, err
 	}
@@ -52,8 +52,8 @@ func (m *Manager) InsertRow(ctx context.Context, projectName, env string, prNumb
 }
 
 // UpdateRow updates the row addressed by its primary key.
-func (m *Manager) UpdateRow(ctx context.Context, projectName, env string, prNumber *int, schema, table string, key, values map[string]any) (db.Row, error) {
-	info, err := m.explorerTarget(ctx, projectName, env, prNumber)
+func (m *Manager) UpdateRow(ctx context.Context, projectName, env, dbKey string, schema, table string, key, values map[string]any) (db.Row, error) {
+	info, err := m.explorerTarget(ctx, projectName, env, dbKey)
 	if err != nil {
 		return nil, err
 	}
@@ -61,8 +61,8 @@ func (m *Manager) UpdateRow(ctx context.Context, projectName, env string, prNumb
 }
 
 // DeleteRow deletes the row addressed by its primary key.
-func (m *Manager) DeleteRow(ctx context.Context, projectName, env string, prNumber *int, schema, table string, key map[string]any) error {
-	info, err := m.explorerTarget(ctx, projectName, env, prNumber)
+func (m *Manager) DeleteRow(ctx context.Context, projectName, env, dbKey string, schema, table string, key map[string]any) error {
+	info, err := m.explorerTarget(ctx, projectName, env, dbKey)
 	if err != nil {
 		return err
 	}

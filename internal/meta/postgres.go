@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -68,6 +69,15 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 	-- Upgrade path: older schemas had a plaintext "password" column that we
 	-- migrate into password_ct in migrateLegacyPasswords below.
 	ALTER TABLE pgmanager.databases ADD COLUMN IF NOT EXISTS password_ct BYTEA;
+
+	-- instance_key generalises pr_number: it separates instances within a
+	-- keyed env, so envs other than "pr" can have more than one database.
+	-- pr_number stays populated for env "pr" because the HTTP API and the
+	-- admin UI still read it.
+	ALTER TABLE pgmanager.databases ADD COLUMN IF NOT EXISTS instance_key TEXT;
+	UPDATE pgmanager.databases
+	   SET instance_key = pr_number::text
+	 WHERE pr_number IS NOT NULL AND instance_key IS NULL;
 
 	CREATE INDEX IF NOT EXISTS idx_databases_project_id ON pgmanager.databases(project_id);
 	CREATE INDEX IF NOT EXISTS idx_databases_env ON pgmanager.databases(env);
@@ -299,18 +309,19 @@ func (s *PostgresStore) DeleteProject(ctx context.Context, name string) ([]Datab
 
 // --- Database operations ----------------------------------------------------
 
-func (s *PostgresStore) CreateDatabase(ctx context.Context, projectID int64, name, userName, password, env string, prNumber *int, expiresAt *time.Time) (*Database, error) {
+func (s *PostgresStore) CreateDatabase(ctx context.Context, projectID int64, name, userName, password, env, key string, expiresAt *time.Time) (*Database, error) {
 	ct, err := s.encryptPassword(password)
 	if err != nil {
 		return nil, err
 	}
+	prNumber := legacyPRNumber(env, key)
 	var id int64
 	var createdAt time.Time
 	err = s.pool.QueryRow(ctx,
-		`INSERT INTO pgmanager.databases (project_id, name, user_name, password_ct, env, pr_number, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`INSERT INTO pgmanager.databases (project_id, name, user_name, password_ct, env, instance_key, pr_number, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8)
 		 RETURNING id, created_at`,
-		projectID, name, userName, ct, env, prNumber, expiresAt,
+		projectID, name, userName, ct, env, key, prNumber, expiresAt,
 	).Scan(&id, &createdAt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database: %w", err)
@@ -323,29 +334,33 @@ func (s *PostgresStore) CreateDatabase(ctx context.Context, projectID int64, nam
 		UserName:  userName,
 		Password:  password,
 		Env:       env,
+		Key:       key,
 		PRNumber:  prNumber,
 		CreatedAt: createdAt,
 		ExpiresAt: expiresAt,
 	}, nil
 }
 
-const dbSelect = `SELECT id, project_id, name, user_name, password_ct, env, pr_number, created_at, expires_at FROM pgmanager.databases`
-
-func (s *PostgresStore) GetDatabase(ctx context.Context, projectID int64, env string, prNumber *int) (*Database, error) {
-	query := dbSelect + ` WHERE project_id = $1 AND env = $2`
-	args := []interface{}{projectID, env}
-	if prNumber != nil {
-		query += " AND pr_number = $3"
-		args = append(args, *prNumber)
-	} else {
-		query += " AND pr_number IS NULL"
+// legacyPRNumber renders a "pr" key back into the pr_number column, which the
+// HTTP API and admin UI still read. A key that does not parse yields nil
+// rather than an error: validation already ran, and the column is a mirror.
+func legacyPRNumber(env, key string) *int {
+	if env != "pr" || key == "" {
+		return nil
 	}
-
-	d, err := s.scanOne(ctx, query, args...)
+	n, err := strconv.Atoi(key)
 	if err != nil {
-		return nil, err
+		return nil
 	}
-	return d, nil
+	return &n
+}
+
+const dbSelect = `SELECT id, project_id, name, user_name, password_ct, env, COALESCE(instance_key, ''), pr_number, created_at, expires_at FROM pgmanager.databases`
+
+func (s *PostgresStore) GetDatabase(ctx context.Context, projectID int64, env, key string) (*Database, error) {
+	return s.scanOne(ctx,
+		dbSelect+` WHERE project_id = $1 AND env = $2 AND COALESCE(instance_key, '') = $3`,
+		projectID, env, key)
 }
 
 func (s *PostgresStore) GetDatabaseByName(ctx context.Context, name string) (*Database, error) {
@@ -376,6 +391,18 @@ func (s *PostgresStore) SetDatabasePassword(ctx context.Context, name, password 
 	return nil
 }
 
+func (s *PostgresStore) SetDatabaseExpiry(ctx context.Context, name string, expiresAt *time.Time) error {
+	result, err := s.pool.Exec(ctx,
+		"UPDATE pgmanager.databases SET expires_at = $1 WHERE name = $2", expiresAt, name)
+	if err != nil {
+		return fmt.Errorf("failed to update database expiry: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("database not found: %s", name)
+	}
+	return nil
+}
+
 func (s *PostgresStore) DeleteDatabase(ctx context.Context, name string) error {
 	result, err := s.pool.Exec(ctx, "DELETE FROM pgmanager.databases WHERE name = $1", name)
 	if err != nil {
@@ -391,9 +418,11 @@ func (s *PostgresStore) GetExpiredDatabases(ctx context.Context) ([]Database, er
 	return s.scanMany(ctx, dbSelect+` WHERE expires_at IS NOT NULL AND expires_at < NOW() ORDER BY expires_at`)
 }
 
-func (s *PostgresStore) GetDatabasesOlderThan(ctx context.Context, env string, olderThan time.Duration) ([]Database, error) {
+func (s *PostgresStore) GetUnleasedDatabasesOlderThan(ctx context.Context, env string, olderThan time.Duration) ([]Database, error) {
 	cutoff := time.Now().Add(-olderThan)
-	return s.scanMany(ctx, dbSelect+` WHERE env = $1 AND created_at < $2 ORDER BY created_at`, env, cutoff)
+	return s.scanMany(ctx,
+		dbSelect+` WHERE env = $1 AND expires_at IS NULL AND created_at < $2 ORDER BY created_at`,
+		env, cutoff)
 }
 
 func (s *PostgresStore) scanOne(ctx context.Context, query string, args ...interface{}) (*Database, error) {
@@ -402,7 +431,7 @@ func (s *PostgresStore) scanOne(ctx context.Context, query string, args ...inter
 	var expiresAt *time.Time
 	var prNum *int
 	err := s.pool.QueryRow(ctx, query, args...).Scan(
-		&d.ID, &d.ProjectID, &d.Name, &d.UserName, &ct, &d.Env, &prNum, &d.CreatedAt, &expiresAt,
+		&d.ID, &d.ProjectID, &d.Name, &d.UserName, &ct, &d.Env, &d.Key, &prNum, &d.CreatedAt, &expiresAt,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -433,7 +462,7 @@ func (s *PostgresStore) scanMany(ctx context.Context, query string, args ...inte
 		var ct []byte
 		var expiresAt *time.Time
 		var prNum *int
-		if err := rows.Scan(&d.ID, &d.ProjectID, &d.Name, &d.UserName, &ct, &d.Env, &prNum, &d.CreatedAt, &expiresAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.ProjectID, &d.Name, &d.UserName, &ct, &d.Env, &d.Key, &prNum, &d.CreatedAt, &expiresAt); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
 		pw, err := s.decryptPassword(ct)

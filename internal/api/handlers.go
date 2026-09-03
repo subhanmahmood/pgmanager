@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"pgmanager/internal/auth"
 	"pgmanager/internal/db"
+	"pgmanager/internal/project"
 )
 
 // MaxPRNumber is the maximum allowed PR number.
@@ -36,6 +37,7 @@ type ProjectResponse struct {
 type DatabaseResponse struct {
 	Project      string  `json:"project"`
 	Env          string  `json:"env"`
+	Key          string  `json:"key,omitempty"`
 	PRNumber     *int    `json:"pr_number,omitempty"`
 	DatabaseName string  `json:"database_name"`
 	UserName     string  `json:"user_name"`
@@ -51,6 +53,7 @@ type DatabaseResponse struct {
 type DatabaseInfoResponse struct {
 	Project      string  `json:"project"`
 	Env          string  `json:"env"`
+	Key          string  `json:"key,omitempty"`
 	PRNumber     *int    `json:"pr_number,omitempty"`
 	DatabaseName string  `json:"database_name"`
 	UserName     string  `json:"user_name"`
@@ -65,9 +68,21 @@ type CreateProjectRequest struct {
 }
 
 type CreateDatabaseRequest struct {
-	Env        string   `json:"env"`
+	Env string `json:"env"`
+	// Key separates instances within a keyed env. PRNumber is the older name
+	// for the same thing, still accepted so clients that predate Key keep
+	// working; Key wins when both are sent.
+	Key        string   `json:"key,omitempty"`
 	PRNumber   *int     `json:"pr_number,omitempty"`
 	Extensions []string `json:"extensions,omitempty"`
+	// TTL is the lease, as a duration string like "14d". Empty means the
+	// server's default for the env.
+	TTL string `json:"ttl,omitempty"`
+}
+
+// RenewDatabaseRequest extends a database's lease.
+type RenewDatabaseRequest struct {
+	TTL string `json:"ttl"`
 }
 
 // RotatePasswordRequest is the (optional) body of a password rotation.
@@ -209,6 +224,7 @@ func (s *Server) listDatabases(w http.ResponseWriter, r *http.Request) {
 		response[i] = DatabaseInfoResponse{
 			Project:      info.Project,
 			Env:          info.Env,
+			Key:          info.Key,
 			PRNumber:     info.PRNumber,
 			DatabaseName: info.DatabaseName,
 			UserName:     info.UserName,
@@ -233,25 +249,40 @@ func (s *Server) createDatabase(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "env is required")
 		return
 	}
-	if req.PRNumber != nil {
-		if *req.PRNumber <= 0 {
-			writeError(w, http.StatusBadRequest, "PR number must be positive")
-			return
-		}
-		if *req.PRNumber > MaxPRNumber {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("PR number must be less than %d", MaxPRNumber))
+	// Key is the current field; pr_number is what older clients send.
+	key := req.Key
+	if key == "" && req.PRNumber != nil {
+		key = strconv.Itoa(*req.PRNumber)
+	}
+	// The API caps PR numbers where the CLI does not, because the number
+	// arrives from an untrusted request and ends up in an identifier. Cap the
+	// resolved key rather than req.PRNumber: a client sending `key` directly
+	// would otherwise create a pr database that parseEnvParam refuses to
+	// parse, leaving it unreachable by every other endpoint. An empty key
+	// falls through to ValidateKey, which says so more precisely.
+	if req.Env == "pr" && key != "" {
+		if n, err := strconv.Atoi(key); err != nil || n <= 0 || n > MaxPRNumber {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("PR number must be a positive integer below %d", MaxPRNumber))
 			return
 		}
 	}
-	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: req.Env}
-	if req.PRNumber != nil {
-		scopeReq.PR = *req.PRNumber
+
+	var ttl *time.Duration
+	if req.TTL != "" {
+		d, err := parseDuration(req.TTL)
+		if err != nil || d <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid ttl")
+			return
+		}
+		ttl = &d
 	}
-	if !requireScope(w, r, scopeReq) {
+
+	if !requireScope(w, r, scopeFor(projectName, req.Env, key)) {
 		return
 	}
 
-	info, err := s.mgr.CreateDatabase(r.Context(), projectName, req.Env, req.PRNumber, req.Extensions)
+	info, err := s.mgr.CreateDatabase(r.Context(), projectName, req.Env, key, req.Extensions, ttl)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -266,6 +297,7 @@ func (s *Server) createDatabase(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, DatabaseResponse{
 		Project:      info.Project,
 		Env:          info.Env,
+		Key:          info.Key,
 		PRNumber:     info.PRNumber,
 		DatabaseName: info.DatabaseName,
 		UserName:     info.UserName,
@@ -281,20 +313,16 @@ func (s *Server) createDatabase(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getDatabase(w http.ResponseWriter, r *http.Request) {
 	projectName := chi.URLParam(r, "name")
 	env := chi.URLParam(r, "env")
-	prNumber, env, err := parseEnvParam(env)
+	key, env, err := parseEnvParam(env)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: env}
-	if prNumber != nil {
-		scopeReq.PR = *prNumber
-	}
-	if !requireScope(w, r, scopeReq) {
+	if !requireScope(w, r, scopeFor(projectName, env, key)) {
 		return
 	}
 
-	info, err := s.mgr.GetDatabase(r.Context(), projectName, env, prNumber)
+	info, err := s.mgr.GetDatabase(r.Context(), projectName, env, key)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "database not found")
 		return
@@ -309,6 +337,7 @@ func (s *Server) getDatabase(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, DatabaseInfoResponse{
 		Project:      info.Project,
 		Env:          info.Env,
+		Key:          info.Key,
 		PRNumber:     info.PRNumber,
 		DatabaseName: info.DatabaseName,
 		UserName:     info.UserName,
@@ -325,20 +354,16 @@ func (s *Server) getDatabase(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getDatabaseCredentials(w http.ResponseWriter, r *http.Request) {
 	projectName := chi.URLParam(r, "name")
 	env := chi.URLParam(r, "env")
-	prNumber, env, err := parseEnvParam(env)
+	key, env, err := parseEnvParam(env)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: env}
-	if prNumber != nil {
-		scopeReq.PR = *prNumber
-	}
-	if !requireScope(w, r, scopeReq) {
+	if !requireScope(w, r, scopeFor(projectName, env, key)) {
 		return
 	}
 
-	info, err := s.mgr.GetDatabase(r.Context(), projectName, env, prNumber)
+	info, err := s.mgr.GetDatabase(r.Context(), projectName, env, key)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "database not found")
 		return
@@ -352,6 +377,7 @@ func (s *Server) getDatabaseCredentials(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, DatabaseResponse{
 		Project:      info.Project,
 		Env:          info.Env,
+		Key:          info.Key,
 		PRNumber:     info.PRNumber,
 		DatabaseName: info.DatabaseName,
 		UserName:     info.UserName,
@@ -370,16 +396,12 @@ func (s *Server) getDatabaseCredentials(w http.ResponseWriter, r *http.Request) 
 func (s *Server) rotateDatabasePassword(w http.ResponseWriter, r *http.Request) {
 	projectName := chi.URLParam(r, "name")
 	env := chi.URLParam(r, "env")
-	prNumber, env, err := parseEnvParam(env)
+	key, env, err := parseEnvParam(env)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: env}
-	if prNumber != nil {
-		scopeReq.PR = *prNumber
-	}
-	if !requireScope(w, r, scopeReq) {
+	if !requireScope(w, r, scopeFor(projectName, env, key)) {
 		return
 	}
 
@@ -388,7 +410,7 @@ func (s *Server) rotateDatabasePassword(w http.ResponseWriter, r *http.Request) 
 		_ = json.NewDecoder(r.Body).Decode(&req) // body is optional
 	}
 
-	info, err := s.mgr.RotatePassword(r.Context(), projectName, env, prNumber, req.Terminate)
+	info, err := s.mgr.RotatePassword(r.Context(), projectName, env, key, req.Terminate)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -402,6 +424,7 @@ func (s *Server) rotateDatabasePassword(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, DatabaseResponse{
 		Project:      info.Project,
 		Env:          info.Env,
+		Key:          info.Key,
 		PRNumber:     info.PRNumber,
 		DatabaseName: info.DatabaseName,
 		UserName:     info.UserName,
@@ -414,23 +437,72 @@ func (s *Server) rotateDatabasePassword(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-func (s *Server) deleteDatabase(w http.ResponseWriter, r *http.Request) {
+// renewDatabase pushes a leased database's expiry out, so something still in
+// use is never reaped. It returns the database without its password: renewing
+// is a lifetime operation, not a credential one.
+func (s *Server) renewDatabase(w http.ResponseWriter, r *http.Request) {
 	projectName := chi.URLParam(r, "name")
-	env := chi.URLParam(r, "env")
-	prNumber, env, err := parseEnvParam(env)
+	key, env, err := parseEnvParam(chi.URLParam(r, "env"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	scopeReq := auth.ScopeRequest{Resource: "project", Project: projectName, Env: env}
-	if prNumber != nil {
-		scopeReq.PR = *prNumber
-	}
-	if !requireScope(w, r, scopeReq) {
+	if !requireScope(w, r, scopeFor(projectName, env, key)) {
 		return
 	}
 
-	if err := s.mgr.DeleteDatabase(r.Context(), projectName, env, prNumber); err != nil {
+	var req RenewDatabaseRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	ttl := s.cfg.Cleanup.DefaultTTL
+	if req.TTL != "" {
+		d, err := parseDuration(req.TTL)
+		if err != nil || d <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid ttl")
+			return
+		}
+		ttl = d
+	}
+
+	info, err := s.mgr.RenewDatabase(r.Context(), projectName, env, key, ttl)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var expiresAt *string
+	if info.ExpiresAt != nil {
+		t := info.ExpiresAt.Format(time.RFC3339)
+		expiresAt = &t
+	}
+	host, port := s.publicHostPort(r)
+	writeJSON(w, http.StatusOK, DatabaseInfoResponse{
+		Project:      info.Project,
+		Env:          info.Env,
+		Key:          info.Key,
+		PRNumber:     info.PRNumber,
+		DatabaseName: info.DatabaseName,
+		UserName:     info.UserName,
+		Host:         host,
+		Port:         port,
+		CreatedAt:    info.CreatedAt.Format(time.RFC3339),
+		ExpiresAt:    expiresAt,
+	})
+}
+
+func (s *Server) deleteDatabase(w http.ResponseWriter, r *http.Request) {
+	projectName := chi.URLParam(r, "name")
+	env := chi.URLParam(r, "env")
+	key, env, err := parseEnvParam(env)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !requireScope(w, r, scopeFor(projectName, env, key)) {
+		return
+	}
+
+	if err := s.mgr.DeleteDatabase(r.Context(), projectName, env, key); err != nil {
 		writeError(w, http.StatusNotFound, "database not found")
 		return
 	}
@@ -515,20 +587,37 @@ func (s *Server) withPublicHost(r *http.Request, dbName, userName, password stri
 	return host, port, db.ConnectionString(host, port, dbName, userName, password, s.cfg.Postgres.SSLMode)
 }
 
-// parseEnvParam parses a URL path env segment which may be "pr_42" form.
-// Returns (prNumber, normalizedEnv, error).
-func parseEnvParam(env string) (*int, string, error) {
-	if len(env) > 3 && env[:3] == "pr_" {
-		num, err := strconv.Atoi(env[3:])
-		if err != nil {
-			return nil, env, fmt.Errorf("invalid PR number")
-		}
-		if num <= 0 || num > MaxPRNumber {
-			return nil, env, fmt.Errorf("invalid PR number")
-		}
-		return &num, "pr", nil
+// parseEnvParam splits a URL path env segment into its env and key. A keyed
+// env carries its key after an underscore — "pr_42", "scratch_epic_231" — and
+// env names contain no underscore, so the first one is the separator.
+// Returns (key, normalizedEnv, error).
+func parseEnvParam(segment string) (string, string, error) {
+	env, key, err := project.ParseEnv(segment)
+	if err != nil {
+		return "", segment, err
 	}
-	return nil, env, nil
+	// The API caps PR numbers where the CLI does not: the number arrives from
+	// an untrusted request and ends up in an identifier.
+	if env == "pr" {
+		num, err := strconv.Atoi(key)
+		if err != nil || num <= 0 || num > MaxPRNumber {
+			return "", segment, fmt.Errorf("invalid PR number")
+		}
+	}
+	return key, env, nil
+}
+
+// scopeFor builds the authorization request for one database. A PR number is
+// still carried separately because the `project:<name>:pr:*` scope form
+// predates keys.
+func scopeFor(projectName, env, key string) auth.ScopeRequest {
+	req := auth.ScopeRequest{Resource: "project", Project: projectName, Env: env}
+	if env == "pr" {
+		if n, err := strconv.Atoi(key); err == nil {
+			req.PR = n
+		}
+	}
+	return req
 }
 
 // parseDuration parses a duration string like "7d", "24h", "1w".

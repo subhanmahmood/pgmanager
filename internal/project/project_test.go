@@ -95,24 +95,25 @@ func TestValidateEnv(t *testing.T) {
 
 func TestDatabaseName(t *testing.T) {
 	tests := []struct {
-		name     string
-		project  string
-		env      string
-		prNumber *int
-		want     string
+		name    string
+		project string
+		env     string
+		key     string
+		want    string
 	}{
-		{"prod database", "myapp", "prod", nil, "myapp_prod"},
-		{"dev database", "myapp", "dev", nil, "myapp_dev"},
-		{"staging database", "myapp", "staging", nil, "myapp_staging"},
-		{"pr database", "myapp", "pr", intPtr(123), "myapp_pr_123"},
-		{"pr database with different number", "myapp", "pr", intPtr(456), "myapp_pr_456"},
+		{"prod database", "myapp", "prod", "", "myapp_prod"},
+		{"dev database", "myapp", "dev", "", "myapp_dev"},
+		{"staging database", "myapp", "staging", "", "myapp_staging"},
+		{"pr database", "myapp", "pr", "123", "myapp_pr_123"},
+		{"pr database with different number", "myapp", "pr", "456", "myapp_pr_456"},
+		{"scratch database", "myapp", "scratch", "epic_231", "myapp_scratch_epic_231"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := DatabaseName(tt.project, tt.env, tt.prNumber)
+			got := DatabaseName(tt.project, tt.env, tt.key)
 			if got != tt.want {
-				t.Errorf("DatabaseName(%q, %q, %v) = %q, want %q", tt.project, tt.env, tt.prNumber, got, tt.want)
+				t.Errorf("DatabaseName(%q, %q, %q) = %q, want %q", tt.project, tt.env, tt.key, got, tt.want)
 			}
 		})
 	}
@@ -144,36 +145,32 @@ func TestParseEnv(t *testing.T) {
 		name    string
 		input   string
 		wantEnv string
-		wantPR  *int
+		wantKey string
 		wantErr bool
 	}{
-		{"prod environment", "prod", "prod", nil, false},
-		{"dev environment", "dev", "dev", nil, false},
-		{"pr environment", "pr_123", "pr", intPtr(123), false},
-		{"pr environment high number", "pr_9999", "pr", intPtr(9999), false},
-		{"invalid pr format", "pr_abc", "", nil, true},
+		{"prod environment", "prod", "prod", "", false},
+		{"dev environment", "dev", "dev", "", false},
+		{"pr environment", "pr_123", "pr", "123", false},
+		{"pr environment high number", "pr_9999", "pr", "9999", false},
+		{"invalid pr format", "pr_abc", "", "", true},
+		{"scratch environment", "scratch_epic_231", "scratch", "epic_231", false},
+		{"scratch key keeps later underscores", "scratch_a_b_c", "scratch", "a_b_c", false},
+		{"scratch key must start with a letter", "scratch_9lives", "", "", true},
+		// An underscore in a non-keyed env is not a separator, so the whole
+		// segment stays the env and ValidateEnv rejects it later.
+		{"underscore in unkeyed env", "dev_extra", "dev_extra", "", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotEnv, gotPR, err := ParseEnv(tt.input)
+			gotEnv, gotKey, err := ParseEnv(tt.input)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ParseEnv(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
 				return
 			}
-			if gotEnv != tt.wantEnv {
-				t.Errorf("ParseEnv(%q) env = %q, want %q", tt.input, gotEnv, tt.wantEnv)
-			}
-			if (gotPR == nil) != (tt.wantPR == nil) {
-				t.Errorf("ParseEnv(%q) prNumber = %v, want %v", tt.input, gotPR, tt.wantPR)
-			}
-			if gotPR != nil && tt.wantPR != nil && *gotPR != *tt.wantPR {
-				t.Errorf("ParseEnv(%q) prNumber = %d, want %d", tt.input, *gotPR, *tt.wantPR)
+			if gotEnv != tt.wantEnv || gotKey != tt.wantKey {
+				t.Errorf("ParseEnv(%q) = (%q, %q), want (%q, %q)", tt.input, gotEnv, gotKey, tt.wantEnv, tt.wantKey)
 			}
 		})
 	}
-}
-
-func intPtr(i int) *int {
-	return &i
 }
